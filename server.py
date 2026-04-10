@@ -3,6 +3,8 @@
 
 import json
 import os
+import subprocess
+import sys
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import unquote
@@ -155,7 +157,68 @@ class Handler(SimpleHTTPRequestHandler):
         pass
 
 
+PLIST_LABEL = "com.claude-code-ui.server"
+PLIST_PATH = Path.home() / "Library/LaunchAgents" / f"{PLIST_LABEL}.plist"
+
+
+def install_launchd():
+    """install a launchd agent so the server starts on login."""
+    server_py = Path(__file__).resolve()
+    python = sys.executable
+    plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{PLIST_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{python}</string>
+        <string>{server_py}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/claude-code-ui.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/claude-code-ui.log</string>
+</dict>
+</plist>"""
+    PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PLIST_PATH.write_text(plist)
+    # load immediately
+    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(PLIST_PATH)],
+                   capture_output=True)
+    subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST_PATH)],
+                   check=True)
+    print(f"installed launch agent: {PLIST_PATH}")
+    print("server will now auto-start on login.")
+
+
+def uninstall_launchd():
+    """remove the launchd agent."""
+    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(PLIST_PATH)],
+                   capture_output=True)
+    if PLIST_PATH.exists():
+        PLIST_PATH.unlink()
+    print("launch agent removed.")
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "install":
+            install_launchd()
+            sys.exit(0)
+        elif sys.argv[1] == "uninstall":
+            uninstall_launchd()
+            sys.exit(0)
+        else:
+            print(f"usage: {sys.argv[0]} [install|uninstall]")
+            sys.exit(1)
+
     server = HTTPServer(("127.0.0.1", PORT), Handler)
     print(f"serving on http://localhost:{PORT}")
     try:
