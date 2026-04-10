@@ -8,12 +8,14 @@
 <meta name="theme-color" content="#ffffff">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Lexend:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Lexend:wght@200;300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/turndown/dist/turndown.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/turndown-plugin-gfm/dist/turndown-plugin-gfm.js"></script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html { color-scheme: light only; }
-html, body { height: 100%; font-family: 'Lexend', sans-serif; background: #ffffff; color: #1a1a1a; }
+html, body { height: 100%; font-family: 'Lexend', sans-serif; font-weight: 300; background: #ffffff; color: #1a1a1a; }
 
 #app { display: flex; height: 100vh; }
 
@@ -25,7 +27,7 @@ html, body { height: 100%; font-family: 'Lexend', sans-serif; background: #fffff
 }
 #sidebar-header {
   padding: 12px 16px; border-bottom: 1px solid #e0e0e0;
-  font-size: 14px; font-weight: 600; color: #666;
+  font-size: 14px; font-weight: 500; color: #666;
   display: flex; align-items: center; justify-content: space-between;
 }
 #search {
@@ -64,8 +66,14 @@ html, body { height: 100%; font-family: 'Lexend', sans-serif; background: #fffff
 }
 .multiselect-mode .plan-item .checkbox { display: inline-block; }
 .plan-info { flex: 1; min-width: 0; }
-.plan-name { font-size: 13px; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #1a1a1a; }
+.plan-name { font-size: 13px; font-weight: 300; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #1a1a1a; }
 .plan-date { font-size: 11px; color: #999; margin-top: 2px; }
+.star-btn {
+  background: none; border: none; cursor: pointer; padding: 0; font-size: 14px;
+  color: #ccc; flex-shrink: 0; line-height: 1; transition: color 0.15s;
+}
+.star-btn:hover { color: #f5a623; }
+.star-btn.active { color: #f5a623; }
 
 /* content pane */
 #content-wrap {
@@ -77,7 +85,7 @@ html, body { height: 100%; font-family: 'Lexend', sans-serif; background: #fffff
 }
 #content-header.visible { display: flex; }
 #content-title {
-  flex: 1; font-size: 14px; font-weight: 600; color: #333;
+  flex: 1; font-size: 14px; font-weight: 500; color: #333;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .header-btn {
@@ -98,20 +106,35 @@ html, body { height: 100%; font-family: 'Lexend', sans-serif; background: #fffff
   color: #aaa; font-size: 14px;
 }
 
-/* edit mode */
-#editor {
-  display: none; flex: 1; width: 100%; background: #fafafa;
-  color: #1a1a1a; border: none; padding: 32px 48px;
-  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 14px;
-  line-height: 1.6; resize: none; outline: none;
-  tab-size: 2;
+/* edit mode — WYSIWYG */
+#content.editing {
+  outline: 2px solid #4a7cff; outline-offset: -2px; border-radius: 4px;
+  min-height: 200px;
 }
-#editor.visible { display: block; }
+#edit-toolbar {
+  display: none; padding: 4px 16px; border-bottom: 1px solid #e0e0e0;
+  background: #f9f9fb; align-items: center; gap: 2px; flex-shrink: 0;
+}
+#edit-toolbar.visible { display: flex; }
+#edit-toolbar button {
+  background: none; border: 1px solid transparent; border-radius: 4px;
+  padding: 4px 8px; font-size: 13px; cursor: pointer; color: #444;
+  font-family: 'SF Mono', 'Fira Code', monospace; line-height: 1;
+}
+#edit-toolbar button:hover { background: #eef0f5; border-color: #d0d0d0; }
+#edit-toolbar .sep { width: 1px; height: 18px; background: #d0d0d0; margin: 0 4px; }
+/* locked blocks in edit mode — visual hint they're read-only */
+#content.editing .locked-block { opacity: 0.7; cursor: not-allowed; position: relative; }
+#content.editing .locked-block::after {
+  content: ''; position: absolute; inset: 0; background: repeating-linear-gradient(
+    -45deg, transparent, transparent 8px, rgba(0,0,0,0.02) 8px, rgba(0,0,0,0.02) 16px
+  );
+}
 
 /* markdown styles */
-#content h1 { font-size: 24px; margin: 0 0 16px; color: #111; font-weight: 600; }
-#content h2 { font-size: 18px; margin: 24px 0 12px; color: #222; border-bottom: 1px solid #e0e0e0; padding-bottom: 6px; font-weight: 500; }
-#content h3 { font-size: 15px; margin: 20px 0 8px; color: #333; font-weight: 500; }
+#content h1 { font-size: 24px; margin: 0 0 16px; color: #111; font-weight: 500; }
+#content h2 { font-size: 18px; margin: 24px 0 12px; color: #222; border-bottom: 1px solid #e0e0e0; padding-bottom: 6px; font-weight: 400; }
+#content h3 { font-size: 15px; margin: 20px 0 8px; color: #333; font-weight: 400; }
 #content p { margin: 8px 0; line-height: 1.6; font-size: 14px; color: #2a2a2a; }
 #content ul, #content ol { margin: 8px 0 8px 24px; font-size: 14px; line-height: 1.6; color: #2a2a2a; }
 #content code { background: #f0f0f4; padding: 2px 6px; border-radius: 3px; font-size: 13px; font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; color: #c7254e; }
@@ -121,7 +144,7 @@ html, body { height: 100%; font-family: 'Lexend', sans-serif; background: #fffff
 #content a { color: #4a7cff; }
 #content table { border-collapse: collapse; margin: 12px 0; font-size: 14px; }
 #content th, #content td { border: 1px solid #e0e0e0; padding: 6px 12px; }
-#content th { background: #f5f5f7; font-weight: 500; }
+#content th { background: #f5f5f7; font-weight: 400; }
 #content hr { border: none; border-top: 1px solid #e0e0e0; margin: 20px 0; }
 #content input[type="checkbox"] { margin-right: 6px; }
 
@@ -169,6 +192,7 @@ html, body { height: 100%; font-family: 'Lexend', sans-serif; background: #fffff
   <div id="content-wrap">
     <div id="content-header">
       <span id="content-title"></span>
+      <button class="star-btn" id="btn-star" style="font-size:18px" title="Toggle favorite">&#9734;</button>
       <button class="header-btn" id="btn-rename">rename</button>
       <button class="header-btn" id="btn-edit">edit</button>
       <button class="header-btn" id="btn-save" style="display:none">save</button>
@@ -176,8 +200,21 @@ html, body { height: 100%; font-family: 'Lexend', sans-serif; background: #fffff
       <button class="header-btn" id="btn-select">select</button>
       <button class="header-btn danger" id="btn-delete">delete</button>
     </div>
+    <div id="edit-toolbar">
+      <button data-cmd="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+      <button data-cmd="italic" title="Italic (Ctrl+I)"><i>I</i></button>
+      <button data-cmd="code" title="Inline code">{ }</button>
+      <span class="sep"></span>
+      <button data-cmd="h1" title="Heading 1">H1</button>
+      <button data-cmd="h2" title="Heading 2">H2</button>
+      <button data-cmd="h3" title="Heading 3">H3</button>
+      <span class="sep"></span>
+      <button data-cmd="ul" title="Bullet list">&bull; list</button>
+      <button data-cmd="ol" title="Numbered list">1. list</button>
+      <span class="sep"></span>
+      <button data-cmd="link" title="Insert link">link</button>
+    </div>
     <div id="content" class="empty">select a plan</div>
-    <textarea id="editor"></textarea>
   </div>
 </div>
 
@@ -222,6 +259,7 @@ async function loadPlan(filename) {
   const res = await fetch('/api/plans/' + encodeURIComponent(filename));
   activeContent = await res.text();
   content.innerHTML = marked.parse(activeContent);
+  updateStarButton();
 }
 
 async function deletePlan(filename) {
@@ -277,6 +315,27 @@ async function savePlan(filename, content) {
   await loadPlans();
 }
 
+async function toggleFavorite(filename) {
+  const res = await fetch('/api/favorites/' + encodeURIComponent(filename), { method: 'POST' });
+  const data = await res.json();
+  // update local state
+  const plan = plans.find(p => p.name === filename);
+  if (plan) plan.favorited = data.favorited;
+  // re-sort: favorites first, then by modified desc
+  plans.sort((a, b) => (a.favorited === b.favorited) ? b.modified - a.modified : a.favorited ? -1 : 1);
+  renderList(document.getElementById('search').value);
+  updateStarButton();
+}
+
+function updateStarButton() {
+  const btn = document.getElementById('btn-star');
+  if (!activeFile) return;
+  const plan = plans.find(p => p.name === activeFile);
+  const fav = plan && plan.favorited;
+  btn.innerHTML = fav ? '&#9733;' : '&#9734;';
+  btn.classList.toggle('active', !!fav);
+}
+
 // -- rendering --
 
 function renderList(filter) {
@@ -289,12 +348,14 @@ function renderList(filter) {
     const active = p.name === activeFile ? ' active' : '';
     const sel = selected.has(p.name) ? ' selected' : '';
     const checked = selected.has(p.name) ? 'checked' : '';
+    const starCls = p.favorited ? ' active' : '';
     return `<div class="plan-item${active}${sel}" data-file="${esc(p.name)}">
       <input type="checkbox" class="checkbox" ${checked}>
       <div class="plan-info">
-        <div class="plan-name">${esc(name)}</div>
+        <div class="plan-name" title="${esc(name)}">${esc(name)}</div>
         <div class="plan-date">${date}</div>
       </div>
+      <button class="star-btn${starCls}" data-star="${esc(p.name)}">${p.favorited ? '&#9733;' : '&#9734;'}</button>
     </div>`;
   }).join('');
 }
@@ -305,31 +366,50 @@ function esc(s) {
   return d.innerHTML;
 }
 
+// -- turndown setup --
+
+const turndownService = new TurndownService({
+  headingStyle: 'atx', codeBlockStyle: 'fenced',
+  bulletListMarker: '-', emDelimiter: '*',
+});
+turndownService.use(turndownPluginGfm.gfm);
+
 // -- edit mode --
 
 function enterEdit() {
   editing = true;
-  document.getElementById('content').style.display = 'none';
-  const editor = document.getElementById('editor');
-  editor.value = activeContent;
-  editor.className = 'visible';
+  const content = document.getElementById('content');
+  const scrollY = content.scrollTop;
+  content.contentEditable = 'true';
+  content.classList.add('editing');
+  // lock code blocks — contenteditable mangles their structure
+  content.querySelectorAll('pre').forEach(el => {
+    el.contentEditable = 'false';
+    el.classList.add('locked-block');
+  });
+  document.getElementById('edit-toolbar').classList.add('visible');
   document.getElementById('btn-edit').style.display = 'none';
   document.getElementById('btn-rename').style.display = 'none';
   document.getElementById('btn-delete').style.display = 'none';
   document.getElementById('btn-select').style.display = 'none';
+  document.getElementById('btn-star').style.display = 'none';
   document.getElementById('btn-save').style.display = '';
   document.getElementById('btn-cancel-edit').style.display = '';
-  editor.focus();
+  content.focus();
+  content.scrollTop = scrollY;
 }
 
 function exitEdit() {
   editing = false;
-  document.getElementById('editor').className = '';
-  document.getElementById('content').style.display = '';
+  const content = document.getElementById('content');
+  content.contentEditable = 'false';
+  content.classList.remove('editing');
+  document.getElementById('edit-toolbar').classList.remove('visible');
   document.getElementById('btn-edit').style.display = '';
   document.getElementById('btn-rename').style.display = '';
   document.getElementById('btn-delete').style.display = '';
   document.getElementById('btn-select').style.display = '';
+  document.getElementById('btn-star').style.display = '';
   document.getElementById('btn-save').style.display = 'none';
   document.getElementById('btn-cancel-edit').style.display = 'none';
 }
@@ -385,6 +465,13 @@ document.getElementById('confirm-no').onclick = () => {
 // -- events --
 
 document.getElementById('plan-list').addEventListener('click', e => {
+  // star click
+  const starBtn = e.target.closest('.star-btn');
+  if (starBtn) {
+    e.stopPropagation();
+    toggleFavorite(starBtn.dataset.star);
+    return;
+  }
   const item = e.target.closest('.plan-item');
   if (!item) return;
   const file = item.dataset.file;
@@ -395,6 +482,10 @@ document.getElementById('plan-list').addEventListener('click', e => {
   }
 });
 
+document.getElementById('btn-star').onclick = () => {
+  if (activeFile) toggleFavorite(activeFile);
+};
+
 document.getElementById('search').addEventListener('input', e => renderList(e.target.value));
 document.getElementById('search').addEventListener('keydown', e => {
   if (e.key === 'Escape') { e.target.value = ''; renderList(''); }
@@ -404,12 +495,19 @@ document.getElementById('search').addEventListener('keydown', e => {
 document.getElementById('btn-edit').onclick = () => { if (activeFile) enterEdit(); };
 document.getElementById('btn-save').onclick = async () => {
   if (!activeFile) return;
-  const content = document.getElementById('editor').value;
-  await savePlan(activeFile, content);
+  const html = document.getElementById('content').innerHTML;
+  const md = turndownService.turndown(html);
+  await savePlan(activeFile, md);
   exitEdit();
+  // re-render from saved markdown for consistency
   document.getElementById('content').innerHTML = marked.parse(activeContent);
 };
-document.getElementById('btn-cancel-edit').onclick = () => exitEdit();
+document.getElementById('btn-cancel-edit').onclick = () => {
+  exitEdit();
+  if (activeContent) {
+    document.getElementById('content').innerHTML = marked.parse(activeContent);
+  }
+};
 
 document.getElementById('btn-delete').onclick = async () => {
   if (!activeFile) return;
@@ -457,15 +555,41 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// tab key in editor inserts tab
-document.getElementById('editor').addEventListener('keydown', e => {
-  if (e.key === 'Tab') {
-    e.preventDefault();
-    const t = e.target;
-    const start = t.selectionStart;
-    t.value = t.value.substring(0, start) + '  ' + t.value.substring(t.selectionEnd);
-    t.selectionStart = t.selectionEnd = start + 2;
+// toolbar commands
+document.getElementById('edit-toolbar').addEventListener('click', e => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const cmd = btn.dataset.cmd;
+  if (!cmd) return;
+  e.preventDefault();
+  if (cmd === 'bold') document.execCommand('bold');
+  else if (cmd === 'italic') document.execCommand('italic');
+  else if (cmd === 'code') {
+    const sel = window.getSelection();
+    if (sel.rangeCount) {
+      const range = sel.getRangeAt(0);
+      const code = document.createElement('code');
+      range.surroundContents(code);
+    }
   }
+  else if (cmd === 'h1') document.execCommand('formatBlock', false, 'h1');
+  else if (cmd === 'h2') document.execCommand('formatBlock', false, 'h2');
+  else if (cmd === 'h3') document.execCommand('formatBlock', false, 'h3');
+  else if (cmd === 'ul') document.execCommand('insertUnorderedList');
+  else if (cmd === 'ol') document.execCommand('insertOrderedList');
+  else if (cmd === 'link') {
+    const url = prompt('URL:');
+    if (url) document.execCommand('createLink', false, url);
+  }
+  document.getElementById('content').focus();
+});
+
+// paste as plain text to avoid injecting unwanted HTML
+document.getElementById('content').addEventListener('paste', e => {
+  if (!editing) return;
+  e.preventDefault();
+  const text = e.clipboardData.getData('text/plain');
+  document.execCommand('insertText', false, text);
 });
 
 // pwa

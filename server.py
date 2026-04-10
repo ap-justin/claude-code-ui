@@ -3,15 +3,29 @@
 
 import json
 import os
+import signal
 import subprocess
-import sys
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import unquote
 
 PLANS_DIR = Path.home() / ".claude" / "plans"
 STATIC_DIR = Path(__file__).parent / "static"
+FAVORITES_FILE = PLANS_DIR / ".favorites.json"
 PORT = 3117
+
+
+def _load_favorites():
+    if FAVORITES_FILE.exists():
+        try:
+            return set(json.loads(FAVORITES_FILE.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return set()
+
+
+def _save_favorites(favs):
+    FAVORITES_FILE.write_text(json.dumps(sorted(favs)), encoding="utf-8")
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -23,6 +37,8 @@ class Handler(SimpleHTTPRequestHandler):
 
         if path == "/api/plans":
             self._serve_plan_list()
+        elif path == "/api/favorites":
+            self._json_response(sorted(_load_favorites()))
         elif path.startswith("/api/plans/"):
             filename = path[len("/api/plans/"):]
             self._serve_plan(filename)
@@ -49,6 +65,9 @@ class Handler(SimpleHTTPRequestHandler):
         path = unquote(self.path)
         if path == "/api/plans/delete-batch":
             self._delete_batch()
+        elif path.startswith("/api/favorites/"):
+            filename = path[len("/api/favorites/"):]
+            self._toggle_favorite(filename)
         elif path.startswith("/api/plans/") and path.endswith("/rename"):
             # /api/plans/<name>/rename
             filename = path[len("/api/plans/"):-len("/rename")]
@@ -69,14 +88,17 @@ class Handler(SimpleHTTPRequestHandler):
         return filepath
 
     def _serve_plan_list(self):
+        favs = _load_favorites()
         plans = []
         for f in PLANS_DIR.iterdir():
             if f.suffix == ".md":
                 plans.append({
                     "name": f.name,
                     "modified": f.stat().st_mtime,
+                    "favorited": f.name in favs,
                 })
-        plans.sort(key=lambda p: p["modified"], reverse=True)
+        # favorites first, then by modified desc
+        plans.sort(key=lambda p: (not p["favorited"], -p["modified"]))
         self._json_response(plans)
 
     def _serve_plan(self, filename):
@@ -100,6 +122,10 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_error(404)
             return
         filepath.unlink()
+        favs = _load_favorites()
+        if filename in favs:
+            favs.discard(filename)
+            _save_favorites(favs)
         self._json_response({"ok": True})
 
     def _delete_batch(self):
@@ -110,6 +136,10 @@ class Handler(SimpleHTTPRequestHandler):
             if filepath.resolve().parent == PLANS_DIR.resolve() and filepath.exists():
                 filepath.unlink()
                 deleted.append(name)
+        favs = _load_favorites()
+        updated = favs - set(deleted)
+        if updated != favs:
+            _save_favorites(updated)
         self._json_response({"deleted": deleted})
 
     def _update_plan(self, filename):
@@ -142,7 +172,24 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_error(409)
             return
         filepath.rename(new_path)
+        # carry over favorite
+        favs = _load_favorites()
+        if filename in favs:
+            favs.discard(filename)
+            favs.add(new_name)
+            _save_favorites(favs)
         self._json_response({"ok": True, "name": new_name})
+
+    def _toggle_favorite(self, filename):
+        favs = _load_favorites()
+        if filename in favs:
+            favs.discard(filename)
+            state = False
+        else:
+            favs.add(filename)
+            state = True
+        _save_favorites(favs)
+        self._json_response({"name": filename, "favorited": state})
 
     def _json_response(self, data):
         body = json.dumps(data).encode("utf-8")
@@ -157,69 +204,41 @@ class Handler(SimpleHTTPRequestHandler):
         pass
 
 
-PLIST_LABEL = "com.claude-code-ui.server"
-PLIST_PATH = Path.home() / "Library/LaunchAgents" / f"{PLIST_LABEL}.plist"
 
+class ReusableHTTPServer(HTTPServer):
+    allow_reuse_address = True
 
-def install_launchd():
-    """install a launchd agent so the server starts on login."""
-    server_py = Path(__file__).resolve()
-    python = sys.executable
-    plist = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{PLIST_LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{python}</string>
-        <string>{server_py}</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/tmp/claude-code-ui.log</string>
-    <key>StandardErrorPath</key>
-    <string>/tmp/claude-code-ui.log</string>
-</dict>
-</plist>"""
-    PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PLIST_PATH.write_text(plist)
-    # load immediately
-    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(PLIST_PATH)],
-                   capture_output=True)
-    subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST_PATH)],
-                   check=True)
-    print(f"installed launch agent: {PLIST_PATH}")
-    print("server will now auto-start on login.")
+    def server_bind(self):
+        import socket
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        super().server_bind()
 
-
-def uninstall_launchd():
-    """remove the launchd agent."""
-    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(PLIST_PATH)],
-                   capture_output=True)
-    if PLIST_PATH.exists():
-        PLIST_PATH.unlink()
-    print("launch agent removed.")
+def _kill_existing(port):
+    """kill any process already listening on port, wait for release"""
+    import time
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            capture_output=True, text=True
+        )
+        pids = [int(p) for p in result.stdout.strip().splitlines() if int(p) != os.getpid()]
+        for pid in pids:
+            os.kill(pid, signal.SIGTERM)
+            print(f"killed old process {pid}")
+        if pids:
+            # wait for port to be released
+            for _ in range(20):
+                r = subprocess.run(["lsof", "-ti", f":{port}"], capture_output=True, text=True)
+                if not r.stdout.strip():
+                    break
+                time.sleep(0.1)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "install":
-            install_launchd()
-            sys.exit(0)
-        elif sys.argv[1] == "uninstall":
-            uninstall_launchd()
-            sys.exit(0)
-        else:
-            print(f"usage: {sys.argv[0]} [install|uninstall]")
-            sys.exit(1)
-
-    server = HTTPServer(("127.0.0.1", PORT), Handler)
+    _kill_existing(PORT)
+    server = ReusableHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"serving on http://localhost:{PORT}")
     try:
         server.serve_forever()

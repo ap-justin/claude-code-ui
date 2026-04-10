@@ -12,23 +12,6 @@ python3 server.py
 
 Open http://localhost:3117 — no dependencies beyond Python 3.
 
-### Install as app (macOS)
-
-```bash
-# 1. install launch agent (auto-starts server on login)
-python3 server.py install
-
-# 2. open localhost:3117 in Chrome, click install icon in address bar
-
-# 3. done — open "Claude Plans" from Spotlight anytime
-```
-
-To remove the launch agent:
-
-```bash
-python3 server.py uninstall
-```
-
 ## Features
 
 - sidebar with search/filter, sorted by recency
