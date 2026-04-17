@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """minimal http server for browsing ~/.claude/plans/ markdown files."""
 
+import html
 import json
 import os
+import re
 import signal
 import subprocess
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlparse
 
 PLANS_DIR = Path.home() / ".claude" / "plans"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -35,7 +37,12 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = unquote(self.path)
 
-        if path == "/api/plans":
+        parsed = urlparse(path)
+
+        if parsed.path == "/api/search":
+            query = parse_qs(parsed.query).get("q", [""])[0]
+            self._search_plans(query)
+        elif path == "/api/plans":
             self._serve_plan_list()
         elif path == "/api/favorites":
             self._json_response(sorted(_load_favorites()))
@@ -72,6 +79,9 @@ class Handler(SimpleHTTPRequestHandler):
             # /api/plans/<name>/rename
             filename = path[len("/api/plans/"):-len("/rename")]
             self._rename_plan(filename)
+        elif path.startswith("/api/plans/") and path.endswith("/duplicate"):
+            filename = path[len("/api/plans/"):-len("/duplicate")]
+            self._duplicate_plan(filename)
         else:
             self.send_error(404)
 
@@ -100,6 +110,47 @@ class Handler(SimpleHTTPRequestHandler):
         # favorites first, then by modified desc
         plans.sort(key=lambda p: (not p["favorited"], -p["modified"]))
         self._json_response(plans)
+
+    def _search_plans(self, query):
+        """search plans by filename and content."""
+        favs = _load_favorites()
+        results = []
+        q = query.lower()
+        if not q:
+            self._serve_plan_list()
+            return
+        for f in PLANS_DIR.iterdir():
+            if f.suffix != ".md":
+                continue
+            name_match = q in f.name.lower()
+            snippet = None
+            try:
+                content = f.read_text(encoding="utf-8")
+            except Exception:
+                content = ""
+            # find content match
+            idx = content.lower().find(q)
+            if idx >= 0:
+                # ~100 chars around the match
+                start = max(0, idx - 50)
+                end = min(len(content), idx + len(query) + 50)
+                raw = content[start:end]
+                # build snippet with <mark> around match
+                escaped = html.escape(raw)
+                pattern = re.compile(re.escape(html.escape(query)), re.IGNORECASE)
+                escaped = pattern.sub(lambda m: f"<mark>{m.group()}</mark>", escaped)
+                prefix = "\u2026" if start > 0 else ""
+                suffix = "\u2026" if end < len(content) else ""
+                snippet = prefix + escaped + suffix
+            if name_match or snippet is not None:
+                results.append({
+                    "name": f.name,
+                    "modified": f.stat().st_mtime,
+                    "favorited": f.name in favs,
+                    "snippet": snippet,
+                })
+        results.sort(key=lambda p: (not p["favorited"], -p["modified"]))
+        self._json_response(results)
 
     def _serve_plan(self, filename):
         filepath = self._validate_path(filename)
@@ -176,6 +227,28 @@ class Handler(SimpleHTTPRequestHandler):
         favs = _load_favorites()
         if filename in favs:
             favs.discard(filename)
+            favs.add(new_name)
+            _save_favorites(favs)
+        self._json_response({"ok": True, "name": new_name})
+
+    def _duplicate_plan(self, filename):
+        filepath = self._validate_path(filename)
+        if not filepath:
+            return
+        if not filepath.exists():
+            self.send_error(404)
+            return
+        content = filepath.read_text(encoding="utf-8")
+        stem = filename.rsplit(".md", 1)[0]
+        new_name = f"{stem}-copy.md"
+        counter = 2
+        while (PLANS_DIR / new_name).exists():
+            new_name = f"{stem}-copy-{counter}.md"
+            counter += 1
+        (PLANS_DIR / new_name).write_text(content, encoding="utf-8")
+        # carry over favorite status
+        favs = _load_favorites()
+        if filename in favs:
             favs.add(new_name)
             _save_favorites(favs)
         self._json_response({"ok": True, "name": new_name})
