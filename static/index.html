@@ -68,6 +68,8 @@ html, body { height: 100%; font-family: 'Lexend', sans-serif; font-weight: 300; 
 .plan-info { flex: 1; min-width: 0; }
 .plan-name { font-size: 13px; font-weight: 300; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #1a1a1a; }
 .plan-date { font-size: 11px; color: #999; margin-top: 2px; }
+.plan-snippet { font-size: 11px; color: #888; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plan-snippet mark { background: #fff3b0; border-radius: 2px; }
 .star-btn {
   background: none; border: none; cursor: pointer; padding: 0; font-size: 14px;
   color: #ccc; flex-shrink: 0; line-height: 1; transition: color 0.15s;
@@ -131,6 +133,8 @@ html, body { height: 100%; font-family: 'Lexend', sans-serif; font-weight: 300; 
   );
 }
 
+.dialog p { margin-bottom: 16px; font-size: 14px; }
+
 /* markdown styles */
 #content h1 { font-size: 24px; margin: 0 0 16px; color: #111; font-weight: 500; }
 #content h2 { font-size: 18px; margin: 24px 0 12px; color: #222; border-bottom: 1px solid #e0e0e0; padding-bottom: 6px; font-weight: 400; }
@@ -158,7 +162,6 @@ html, body { height: 100%; font-family: 'Lexend', sans-serif; font-weight: 300; 
   background: #fff; border: 1px solid #d0d0d0; border-radius: 8px;
   padding: 24px; max-width: 400px; width: 90%; box-shadow: 0 8px 30px rgba(0,0,0,0.12);
 }
-.dialog p { margin-bottom: 16px; font-size: 14px; }
 .dialog-buttons { display: flex; gap: 8px; justify-content: flex-end; }
 
 /* rename input */
@@ -181,38 +184,39 @@ html, body { height: 100%; font-family: 'Lexend', sans-serif; font-weight: 300; 
       <span>Claude Plans</span>
       <span id="count"></span>
     </div>
-    <input id="search" type="text" placeholder="filter plans...">
+    <input id="search" type="text" placeholder="search plans...">
     <div id="toolbar">
       <span id="sel-count">0 selected</span>
-      <button id="del-selected" class="">delete</button>
-      <button class="cancel-btn" id="cancel-select">cancel</button>
+      <button type="button" id="del-selected" class="">delete</button>
+      <button type="button" class="cancel-btn" id="cancel-select">cancel</button>
     </div>
     <div id="plan-list"></div>
   </div>
   <div id="content-wrap">
     <div id="content-header">
       <span id="content-title"></span>
-      <button class="star-btn" id="btn-star" style="font-size:18px" title="Toggle favorite">&#9734;</button>
-      <button class="header-btn" id="btn-rename">rename</button>
-      <button class="header-btn" id="btn-edit">edit</button>
-      <button class="header-btn" id="btn-save" style="display:none">save</button>
-      <button class="header-btn" id="btn-cancel-edit" style="display:none">cancel</button>
-      <button class="header-btn" id="btn-select">select</button>
-      <button class="header-btn danger" id="btn-delete">delete</button>
+      <button type="button" class="star-btn" id="btn-star" style="font-size:18px" title="Toggle favorite">&#9734;</button>
+      <button type="button" class="header-btn" id="btn-rename">rename</button>
+      <button type="button" class="header-btn" id="btn-copy-path">copy path</button>
+      <button type="button" class="header-btn" id="btn-edit">edit</button>
+      <button type="button" class="header-btn" id="btn-save" style="display:none">save</button>
+      <button type="button" class="header-btn" id="btn-cancel-edit" style="display:none">cancel</button>
+      <button type="button" class="header-btn" id="btn-select">select</button>
+      <button type="button" class="header-btn danger" id="btn-delete">delete</button>
     </div>
     <div id="edit-toolbar">
-      <button data-cmd="bold" title="Bold (Ctrl+B)"><b>B</b></button>
-      <button data-cmd="italic" title="Italic (Ctrl+I)"><i>I</i></button>
-      <button data-cmd="code" title="Inline code">{ }</button>
+      <button type="button" data-cmd="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+      <button type="button" data-cmd="italic" title="Italic (Ctrl+I)"><i>I</i></button>
+      <button type="button" data-cmd="code" title="Inline code">{ }</button>
       <span class="sep"></span>
-      <button data-cmd="h1" title="Heading 1">H1</button>
-      <button data-cmd="h2" title="Heading 2">H2</button>
-      <button data-cmd="h3" title="Heading 3">H3</button>
+      <button type="button" data-cmd="h1" title="Heading 1">H1</button>
+      <button type="button" data-cmd="h2" title="Heading 2">H2</button>
+      <button type="button" data-cmd="h3" title="Heading 3">H3</button>
       <span class="sep"></span>
-      <button data-cmd="ul" title="Bullet list">&bull; list</button>
-      <button data-cmd="ol" title="Numbered list">1. list</button>
+      <button type="button" data-cmd="ul" title="Bullet list">&bull; list</button>
+      <button type="button" data-cmd="ol" title="Numbered list">1. list</button>
       <span class="sep"></span>
-      <button data-cmd="link" title="Insert link">link</button>
+      <button type="button" data-cmd="link" title="Insert link">link</button>
     </div>
     <div id="content" class="empty">select a plan</div>
   </div>
@@ -223,8 +227,8 @@ html, body { height: 100%; font-family: 'Lexend', sans-serif; font-weight: 300; 
   <div class="dialog">
     <p id="confirm-msg"></p>
     <div class="dialog-buttons">
-      <button class="header-btn" id="confirm-no">cancel</button>
-      <button class="header-btn danger" id="confirm-yes">delete</button>
+      <button type="button" class="header-btn" id="confirm-no">cancel</button>
+      <button type="button" class="header-btn danger" id="confirm-yes">delete</button>
     </div>
   </div>
 </div>
@@ -235,8 +239,11 @@ let activeFile = null;
 let activeContent = '';  // raw markdown of active plan
 let editing = false;
 let multiselect = false;
-let selected = new Set();
+const selected = new Set();
 let confirmResolve = null;
+let searchResults = null;
+let searchSeq = 0;
+let searchTimer = null;
 
 // -- data --
 
@@ -331,7 +338,7 @@ function updateStarButton() {
   const btn = document.getElementById('btn-star');
   if (!activeFile) return;
   const plan = plans.find(p => p.name === activeFile);
-  const fav = plan && plan.favorited;
+  const fav = plan?.favorited;
   btn.innerHTML = fav ? '&#9733;' : '&#9734;';
   btn.classList.toggle('active', !!fav);
 }
@@ -340,8 +347,16 @@ function updateStarButton() {
 
 function renderList(filter) {
   const list = document.getElementById('plan-list');
-  const lf = filter.toLowerCase();
-  const filtered = plans.filter(p => p.name.toLowerCase().includes(lf));
+  const countEl = document.getElementById('count');
+  let filtered;
+  if (searchResults !== null) {
+    filtered = searchResults;
+    countEl.textContent = filtered.length + ' results';
+  } else {
+    const lf = filter.toLowerCase();
+    filtered = plans.filter(p => p.name.toLowerCase().includes(lf));
+    countEl.textContent = plans.length;
+  }
   list.innerHTML = filtered.map(p => {
     const name = p.name.replace(/\.md$/, '');
     const date = new Date(p.modified * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -349,11 +364,13 @@ function renderList(filter) {
     const sel = selected.has(p.name) ? ' selected' : '';
     const checked = selected.has(p.name) ? 'checked' : '';
     const starCls = p.favorited ? ' active' : '';
+    const snippetHtml = p.snippet ? `<div class="plan-snippet">${p.snippet}</div>` : '';
     return `<div class="plan-item${active}${sel}" data-file="${esc(p.name)}">
       <input type="checkbox" class="checkbox" ${checked}>
       <div class="plan-info">
         <div class="plan-name" title="${esc(name)}">${esc(name)}</div>
         <div class="plan-date">${date}</div>
+        ${snippetHtml}
       </div>
       <button class="star-btn${starCls}" data-star="${esc(p.name)}">${p.favorited ? '&#9733;' : '&#9734;'}</button>
     </div>`;
@@ -390,6 +407,7 @@ function enterEdit() {
   document.getElementById('edit-toolbar').classList.add('visible');
   document.getElementById('btn-edit').style.display = 'none';
   document.getElementById('btn-rename').style.display = 'none';
+  document.getElementById('btn-copy-path').style.display = 'none';
   document.getElementById('btn-delete').style.display = 'none';
   document.getElementById('btn-select').style.display = 'none';
   document.getElementById('btn-star').style.display = 'none';
@@ -407,6 +425,7 @@ function exitEdit() {
   document.getElementById('edit-toolbar').classList.remove('visible');
   document.getElementById('btn-edit').style.display = '';
   document.getElementById('btn-rename').style.display = '';
+  document.getElementById('btn-copy-path').style.display = '';
   document.getElementById('btn-delete').style.display = '';
   document.getElementById('btn-select').style.display = '';
   document.getElementById('btn-star').style.display = '';
@@ -486,9 +505,30 @@ document.getElementById('btn-star').onclick = () => {
   if (activeFile) toggleFavorite(activeFile);
 };
 
-document.getElementById('search').addEventListener('input', e => renderList(e.target.value));
+document.getElementById('search').addEventListener('input', e => {
+  const q = e.target.value;
+  clearTimeout(searchTimer);
+  if (!q) {
+    searchResults = null;
+    renderList('');
+    return;
+  }
+  searchTimer = setTimeout(async () => {
+    const seq = ++searchSeq;
+    const res = await fetch('/api/search?q=' + encodeURIComponent(q));
+    const data = await res.json();
+    if (seq !== searchSeq) return; // discard stale
+    searchResults = data;
+    renderList(q);
+  }, 200);
+});
 document.getElementById('search').addEventListener('keydown', e => {
-  if (e.key === 'Escape') { e.target.value = ''; renderList(''); }
+  if (e.key === 'Escape') {
+    e.target.value = '';
+    searchResults = null;
+    clearTimeout(searchTimer);
+    renderList('');
+  }
 });
 
 // header buttons
@@ -521,6 +561,15 @@ document.getElementById('del-selected').onclick = async () => {
   if (selected.size === 0) return;
   const ok = await confirm('Delete ' + selected.size + ' plan(s)?');
   if (ok) deleteBatch(selected);
+};
+
+document.getElementById('btn-copy-path').onclick = () => {
+  if (!activeFile) return;
+  const path = '~/.claude/plans/' + activeFile;
+  navigator.clipboard.writeText(path);
+  const btn = document.getElementById('btn-copy-path');
+  btn.textContent = 'copied!';
+  setTimeout(() => { btn.textContent = 'copy path'; }, 1500);
 };
 
 document.getElementById('btn-rename').onclick = () => {
