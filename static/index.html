@@ -13,64 +13,12 @@
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/turndown/dist/turndown.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/turndown-plugin-gfm/dist/turndown-plugin-gfm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/preact@10/dist/preact.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/preact@10/hooks/dist/hooks.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/htm@3/dist/htm.umd.js"></script>
 </head>
 <body>
-<div id="app">
-  <div id="sidebar">
-    <div id="sidebar-header">
-      <span>Claude Plans</span>
-      <span id="count"></span>
-    </div>
-    <input id="search" type="text" placeholder="search plans...">
-    <div id="toolbar">
-      <span id="sel-count">0 selected</span>
-      <button type="button" id="del-selected" class="">delete</button>
-      <button type="button" class="cancel-btn" id="cancel-select">cancel</button>
-    </div>
-    <div id="plan-list"></div>
-  </div>
-  <div id="content-wrap">
-    <div id="content-header">
-      <span id="content-title"></span>
-      <button type="button" class="star-btn" id="btn-star" style="font-size:18px" title="Toggle favorite">&#9734;</button>
-      <button type="button" class="header-btn" id="btn-duplicate">duplicate</button>
-      <button type="button" class="header-btn" id="btn-rename">rename</button>
-      <button type="button" class="header-btn" id="btn-copy-path">copy path</button>
-      <button type="button" class="header-btn" id="btn-edit">edit</button>
-      <button type="button" class="header-btn" id="btn-save" style="display:none">save</button>
-      <button type="button" class="header-btn" id="btn-cancel-edit" style="display:none">cancel</button>
-      <button type="button" class="header-btn" id="btn-select">select</button>
-      <button type="button" class="header-btn danger" id="btn-delete">delete</button>
-    </div>
-    <div id="edit-toolbar">
-      <button type="button" data-cmd="bold" title="Bold (Ctrl+B)"><b>B</b></button>
-      <button type="button" data-cmd="italic" title="Italic (Ctrl+I)"><i>I</i></button>
-      <button type="button" data-cmd="code" title="Inline code">{ }</button>
-      <span class="sep"></span>
-      <button type="button" data-cmd="h1" title="Heading 1">H1</button>
-      <button type="button" data-cmd="h2" title="Heading 2">H2</button>
-      <button type="button" data-cmd="h3" title="Heading 3">H3</button>
-      <span class="sep"></span>
-      <button type="button" data-cmd="ul" title="Bullet list">&bull; list</button>
-      <button type="button" data-cmd="ol" title="Numbered list">1. list</button>
-      <span class="sep"></span>
-      <button type="button" data-cmd="link" title="Insert link">link</button>
-    </div>
-    <div id="content" class="empty">select a plan</div>
-  </div>
-</div>
-
-<!-- confirm dialog -->
-<div class="dialog-overlay" id="confirm-dialog">
-  <div class="dialog">
-    <p id="confirm-msg"></p>
-    <div class="dialog-buttons">
-      <button type="button" class="header-btn" id="confirm-no">cancel</button>
-      <button type="button" class="header-btn danger" id="confirm-yes">delete</button>
-    </div>
-  </div>
-</div>
-
+<div id="app"></div>
 <script src="/app.js"></script>
 </body>
 </html>

@@ -6,7 +6,10 @@ import json
 import os
 import re
 import signal
+import sqlite3
 import subprocess
+import uuid
+from datetime import datetime, timezone
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -14,6 +17,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 PLANS_DIR = Path.home() / ".claude" / "plans"
 STATIC_DIR = Path(__file__).parent / "static"
 FAVORITES_FILE = PLANS_DIR / ".favorites.json"
+DB_PATH = PLANS_DIR / "comments.db"
 PORT = 3117
 
 
@@ -28,6 +32,75 @@ def _load_favorites():
 
 def _save_favorites(favs):
     FAVORITES_FILE.write_text(json.dumps(sorted(favs)), encoding="utf-8")
+
+
+def _init_db():
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS threads (
+            id TEXT PRIMARY KEY,
+            plan TEXT NOT NULL,
+            selected_text TEXT NOT NULL,
+            prefix TEXT NOT NULL DEFAULT '',
+            suffix TEXT NOT NULL DEFAULT '',
+            resolved INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS comments (
+            id TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+            body TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_threads_plan ON threads(plan);
+        CREATE INDEX IF NOT EXISTS idx_comments_thread ON comments(thread_id);
+    """)
+    conn.close()
+
+
+def _get_db():
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _gen_id(prefix=""):
+    return f"{prefix}{uuid.uuid4().hex[:12]}"
+
+
+def _now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _threads_for_plan(plan):
+    """return nested thread+comments structure for a plan."""
+    db = _get_db()
+    rows = db.execute(
+        "SELECT * FROM threads WHERE plan = ? ORDER BY created_at", (plan,)
+    ).fetchall()
+    threads = []
+    for r in rows:
+        comments = db.execute(
+            "SELECT * FROM comments WHERE thread_id = ? ORDER BY created_at",
+            (r["id"],),
+        ).fetchall()
+        threads.append({
+            "id": r["id"],
+            "selectedText": r["selected_text"],
+            "prefix": r["prefix"],
+            "suffix": r["suffix"],
+            "resolved": bool(r["resolved"]),
+            "createdAt": r["created_at"],
+            "comments": [
+                {"id": c["id"], "body": c["body"], "createdAt": c["created_at"]}
+                for c in comments
+            ],
+        })
+    db.close()
+    return threads
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -46,6 +119,9 @@ class Handler(SimpleHTTPRequestHandler):
             self._serve_plan_list()
         elif path == "/api/favorites":
             self._json_response(sorted(_load_favorites()))
+        elif path.startswith("/api/comments/"):
+            filename = path[len("/api/comments/"):]
+            self._get_comments(filename)
         elif path.startswith("/api/plans/"):
             filename = path[len("/api/plans/"):]
             self._serve_plan(filename)
@@ -54,7 +130,15 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self):
         path = unquote(self.path)
-        if path.startswith("/api/plans/"):
+        if path.startswith("/api/comments/"):
+            # /api/comments/<plan>/<threadId>
+            rest = path[len("/api/comments/"):]
+            parts = rest.split("/", 1)
+            if len(parts) == 2:
+                self._delete_thread(parts[0], parts[1])
+            else:
+                self.send_error(404)
+        elif path.startswith("/api/plans/"):
             filename = path[len("/api/plans/"):]
             self._delete_plan(filename)
         else:
@@ -72,6 +156,25 @@ class Handler(SimpleHTTPRequestHandler):
         path = unquote(self.path)
         if path == "/api/plans/delete-batch":
             self._delete_batch()
+        elif path.startswith("/api/comments/"):
+            rest = path[len("/api/comments/"):]
+            if rest.endswith("/resolve"):
+                # /api/comments/<plan>/<threadId>/resolve
+                parts = rest[:-len("/resolve")].split("/", 1)
+                if len(parts) == 2:
+                    self._resolve_thread(parts[0], parts[1])
+                else:
+                    self.send_error(404)
+            elif "/reply" in rest:
+                # /api/comments/<plan>/<threadId>/reply
+                parts = rest[:-len("/reply")].split("/", 1)
+                if len(parts) == 2:
+                    self._reply_thread(parts[0], parts[1])
+                else:
+                    self.send_error(404)
+            else:
+                # /api/comments/<plan> — create thread
+                self._create_thread(rest)
         elif path.startswith("/api/favorites/"):
             filename = path[len("/api/favorites/"):]
             self._toggle_favorite(filename)
@@ -177,6 +280,11 @@ class Handler(SimpleHTTPRequestHandler):
         if filename in favs:
             favs.discard(filename)
             _save_favorites(favs)
+        # clean up comments
+        db = _get_db()
+        db.execute("DELETE FROM threads WHERE plan = ?", (filename,))
+        db.commit()
+        db.close()
         self._json_response({"ok": True})
 
     def _delete_batch(self):
@@ -191,6 +299,12 @@ class Handler(SimpleHTTPRequestHandler):
         updated = favs - set(deleted)
         if updated != favs:
             _save_favorites(updated)
+        # clean up comments
+        db = _get_db()
+        for name in deleted:
+            db.execute("DELETE FROM threads WHERE plan = ?", (name,))
+        db.commit()
+        db.close()
         self._json_response({"deleted": deleted})
 
     def _update_plan(self, filename):
@@ -229,6 +343,11 @@ class Handler(SimpleHTTPRequestHandler):
             favs.discard(filename)
             favs.add(new_name)
             _save_favorites(favs)
+        # migrate comments
+        db = _get_db()
+        db.execute("UPDATE threads SET plan = ? WHERE plan = ?", (new_name, filename))
+        db.commit()
+        db.close()
         self._json_response({"ok": True, "name": new_name})
 
     def _duplicate_plan(self, filename):
@@ -252,6 +371,62 @@ class Handler(SimpleHTTPRequestHandler):
             favs.add(new_name)
             _save_favorites(favs)
         self._json_response({"ok": True, "name": new_name})
+
+    def _get_comments(self, filename):
+        self._json_response(_threads_for_plan(filename))
+
+    def _create_thread(self, filename):
+        body = json.loads(self._read_body())
+        thread_id = _gen_id("t_")
+        comment_id = _gen_id("c_")
+        now = _now()
+        db = _get_db()
+        db.execute(
+            "INSERT INTO threads (id, plan, selected_text, prefix, suffix, created_at) VALUES (?,?,?,?,?,?)",
+            (thread_id, filename, body["selectedText"], body.get("prefix", ""), body.get("suffix", ""), now),
+        )
+        db.execute(
+            "INSERT INTO comments (id, thread_id, body, created_at) VALUES (?,?,?,?)",
+            (comment_id, thread_id, body["body"], now),
+        )
+        db.commit()
+        db.close()
+        self._json_response({
+            "id": thread_id,
+            "selectedText": body["selectedText"],
+            "prefix": body.get("prefix", ""),
+            "suffix": body.get("suffix", ""),
+            "resolved": False,
+            "createdAt": now,
+            "comments": [{"id": comment_id, "body": body["body"], "createdAt": now}],
+        })
+
+    def _reply_thread(self, filename, thread_id):
+        body = json.loads(self._read_body())
+        comment_id = _gen_id("c_")
+        now = _now()
+        db = _get_db()
+        db.execute(
+            "INSERT INTO comments (id, thread_id, body, created_at) VALUES (?,?,?,?)",
+            (comment_id, thread_id, body["body"], now),
+        )
+        db.commit()
+        db.close()
+        self._json_response({"id": comment_id, "body": body["body"], "createdAt": now})
+
+    def _resolve_thread(self, filename, thread_id):
+        db = _get_db()
+        db.execute("UPDATE threads SET resolved = 1 WHERE id = ?", (thread_id,))
+        db.commit()
+        db.close()
+        self._json_response({"ok": True})
+
+    def _delete_thread(self, filename, thread_id):
+        db = _get_db()
+        db.execute("DELETE FROM threads WHERE id = ?", (thread_id,))
+        db.commit()
+        db.close()
+        self._json_response({"ok": True})
 
     def _toggle_favorite(self, filename):
         favs = _load_favorites()
@@ -311,6 +486,7 @@ def _kill_existing(port):
 
 if __name__ == "__main__":
     _kill_existing(PORT)
+    _init_db()
     server = ReusableHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"serving on http://localhost:{PORT}")
     try:

@@ -1,160 +1,6 @@
-let plans = [];
-let activeFile = null;
-let activeContent = '';  // raw markdown of active plan
-let editing = false;
-let multiselect = false;
-const selected = new Set();
-let confirmResolve = null;
-let searchResults = null;
-let searchSeq = 0;
-let searchTimer = null;
-let lastClickedIndex = null;
-
-// -- data --
-
-async function loadPlans() {
-  const res = await fetch('/api/plans');
-  plans = await res.json();
-  document.getElementById('count').textContent = plans.length;
-  renderList(document.getElementById('search').value);
-}
-
-async function loadPlan(filename) {
-  exitEdit();
-  activeFile = filename;
-  renderList(document.getElementById('search').value);
-  const header = document.getElementById('content-header');
-  header.className = 'visible';
-  document.getElementById('content-title').textContent = filename.replace(/\.md$/, '');
-  const content = document.getElementById('content');
-  content.className = '';
-  const res = await fetch('/api/plans/' + encodeURIComponent(filename));
-  activeContent = await res.text();
-  content.innerHTML = marked.parse(activeContent);
-  updateStarButton();
-}
-
-async function deletePlan(filename) {
-  await fetch('/api/plans/' + encodeURIComponent(filename), { method: 'DELETE' });
-  if (activeFile === filename) {
-    activeFile = null;
-    activeContent = '';
-    document.getElementById('content').className = 'empty';
-    document.getElementById('content').innerHTML = 'select a plan';
-    document.getElementById('content-header').className = '';
-  }
-  await loadPlans();
-}
-
-async function deleteBatch(files) {
-  await fetch('/api/plans/delete-batch', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ files: Array.from(files) }),
-  });
-  if (files.has(activeFile)) {
-    activeFile = null;
-    activeContent = '';
-    document.getElementById('content').className = 'empty';
-    document.getElementById('content').innerHTML = 'select a plan';
-    document.getElementById('content-header').className = '';
-  }
-  exitMultiselect();
-  await loadPlans();
-}
-
-async function renamePlan(oldName, newName) {
-  const res = await fetch('/api/plans/' + encodeURIComponent(oldName) + '/rename', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: newName }),
-  });
-  if (!res.ok) return false;
-  const data = await res.json();
-  if (activeFile === oldName) activeFile = data.name;
-  await loadPlans();
-  if (activeFile) loadPlan(activeFile);
-  return true;
-}
-
-async function savePlan(filename, content) {
-  await fetch('/api/plans/' + encodeURIComponent(filename), {
-    method: 'PUT',
-    headers: { 'Content-Type': 'text/plain' },
-    body: content,
-  });
-  activeContent = content;
-  await loadPlans();
-}
-
-async function duplicatePlan(filename) {
-  const res = await fetch('/api/plans/' + encodeURIComponent(filename) + '/duplicate', { method: 'POST' });
-  if (!res.ok) return;
-  const data = await res.json();
-  await loadPlans();
-  loadPlan(data.name);
-}
-
-async function toggleFavorite(filename) {
-  const res = await fetch('/api/favorites/' + encodeURIComponent(filename), { method: 'POST' });
-  const data = await res.json();
-  // update local state
-  const plan = plans.find(p => p.name === filename);
-  if (plan) plan.favorited = data.favorited;
-  // re-sort: favorites first, then by modified desc
-  plans.sort((a, b) => (a.favorited === b.favorited) ? b.modified - a.modified : a.favorited ? -1 : 1);
-  renderList(document.getElementById('search').value);
-  updateStarButton();
-}
-
-function updateStarButton() {
-  const btn = document.getElementById('btn-star');
-  if (!activeFile) return;
-  const plan = plans.find(p => p.name === activeFile);
-  const fav = plan?.favorited;
-  btn.innerHTML = fav ? '&#9733;' : '&#9734;';
-  btn.classList.toggle('active', !!fav);
-}
-
-// -- rendering --
-
-function renderList(filter) {
-  const list = document.getElementById('plan-list');
-  const countEl = document.getElementById('count');
-  let filtered;
-  if (searchResults !== null) {
-    filtered = searchResults;
-    countEl.textContent = filtered.length + ' results';
-  } else {
-    const lf = filter.toLowerCase();
-    filtered = plans.filter(p => p.name.toLowerCase().includes(lf));
-    countEl.textContent = plans.length;
-  }
-  list.innerHTML = filtered.map(p => {
-    const name = p.name.replace(/\.md$/, '');
-    const date = new Date(p.modified * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-    const active = p.name === activeFile ? ' active' : '';
-    const sel = selected.has(p.name) ? ' selected' : '';
-    const checked = selected.has(p.name) ? 'checked' : '';
-    const starCls = p.favorited ? ' active' : '';
-    const snippetHtml = p.snippet ? `<div class="plan-snippet">${p.snippet}</div>` : '';
-    return `<div class="plan-item${active}${sel}" data-file="${esc(p.name)}">
-      <input type="checkbox" class="checkbox" ${checked}>
-      <div class="plan-info">
-        <div class="plan-name" title="${esc(name)}">${esc(name)}</div>
-        <div class="plan-date">${date}</div>
-        ${snippetHtml}
-      </div>
-      <button class="star-btn${starCls}" data-star="${esc(p.name)}">${p.favorited ? '&#9733;' : '&#9734;'}</button>
-    </div>`;
-  }).join('');
-}
-
-function esc(s) {
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
-}
+const { h, render } = preact;
+const { useState, useEffect, useRef, useCallback, useMemo } = preactHooks;
+const html = htm.bind(h);
 
 // -- turndown setup --
 
@@ -164,282 +10,891 @@ const turndownService = new TurndownService({
 });
 turndownService.use(turndownPluginGfm.gfm);
 
-// -- edit mode --
+// -- api layer --
 
-function enterEdit() {
-  editing = true;
-  const content = document.getElementById('content');
-  const scrollY = content.scrollTop;
-  content.contentEditable = 'true';
-  content.classList.add('editing');
-  // lock code blocks — contenteditable mangles their structure
-  content.querySelectorAll('pre').forEach(el => {
-    el.contentEditable = 'false';
-    el.classList.add('locked-block');
-  });
-  document.getElementById('edit-toolbar').classList.add('visible');
-  document.getElementById('btn-edit').style.display = 'none';
-  document.getElementById('btn-duplicate').style.display = 'none';
-  document.getElementById('btn-rename').style.display = 'none';
-  document.getElementById('btn-copy-path').style.display = 'none';
-  document.getElementById('btn-delete').style.display = 'none';
-  document.getElementById('btn-select').style.display = 'none';
-  document.getElementById('btn-star').style.display = 'none';
-  document.getElementById('btn-save').style.display = '';
-  document.getElementById('btn-cancel-edit').style.display = '';
-  content.focus();
-  content.scrollTop = scrollY;
-}
-
-function exitEdit() {
-  editing = false;
-  const content = document.getElementById('content');
-  content.contentEditable = 'false';
-  content.classList.remove('editing');
-  document.getElementById('edit-toolbar').classList.remove('visible');
-  document.getElementById('btn-edit').style.display = '';
-  document.getElementById('btn-duplicate').style.display = '';
-  document.getElementById('btn-rename').style.display = '';
-  document.getElementById('btn-copy-path').style.display = '';
-  document.getElementById('btn-delete').style.display = '';
-  document.getElementById('btn-select').style.display = '';
-  document.getElementById('btn-star').style.display = '';
-  document.getElementById('btn-save').style.display = 'none';
-  document.getElementById('btn-cancel-edit').style.display = 'none';
-}
-
-// -- multiselect --
-
-function enterMultiselect() {
-  multiselect = true;
-  selected.clear();
-  document.getElementById('sidebar').classList.add('multiselect-mode');
-  document.getElementById('toolbar').classList.add('visible');
-  updateSelCount();
-  renderList(document.getElementById('search').value);
-}
-
-function exitMultiselect() {
-  multiselect = false;
-  selected.clear();
-  document.getElementById('sidebar').classList.remove('multiselect-mode');
-  document.getElementById('toolbar').classList.remove('visible');
-  renderList(document.getElementById('search').value);
-}
-
-function toggleSelection(name) {
-  if (selected.has(name)) selected.delete(name); else selected.add(name);
-  updateSelCount();
-  renderList(document.getElementById('search').value);
-}
-
-function updateSelCount() {
-  document.getElementById('sel-count').textContent = selected.size + ' selected';
-}
-
-// -- confirm dialog --
-
-function confirm(msg) {
-  return new Promise(resolve => {
-    document.getElementById('confirm-msg').textContent = msg;
-    document.getElementById('confirm-dialog').classList.add('visible');
-    confirmResolve = resolve;
-  });
-}
-
-document.getElementById('confirm-yes').onclick = () => {
-  document.getElementById('confirm-dialog').classList.remove('visible');
-  if (confirmResolve) confirmResolve(true);
-};
-document.getElementById('confirm-no').onclick = () => {
-  document.getElementById('confirm-dialog').classList.remove('visible');
-  if (confirmResolve) confirmResolve(false);
-};
-
-// -- events --
-
-document.getElementById('plan-list').addEventListener('click', e => {
-  // star click
-  const starBtn = e.target.closest('.star-btn');
-  if (starBtn) {
-    e.stopPropagation();
-    toggleFavorite(starBtn.dataset.star);
-    return;
-  }
-  const item = e.target.closest('.plan-item');
-  if (!item) return;
-  const file = item.dataset.file;
-  const items = [...document.querySelectorAll('#plan-list .plan-item')];
-  const clickedIdx = items.indexOf(item);
-
-  if (e.shiftKey && lastClickedIndex !== null) {
-    // shift-click range select
-    if (!multiselect) enterMultiselect();
-    const lo = Math.min(lastClickedIndex, clickedIdx);
-    const hi = Math.max(lastClickedIndex, clickedIdx);
-    for (let i = lo; i <= hi; i++) {
-      selected.add(items[i].dataset.file);
-    }
-    updateSelCount();
-    renderList(document.getElementById('search').value);
-    return;
-  }
-
-  lastClickedIndex = clickedIdx;
-  if (multiselect) {
-    toggleSelection(file);
-  } else {
-    loadPlan(file);
-  }
-});
-
-document.getElementById('btn-star').onclick = () => {
-  if (activeFile) toggleFavorite(activeFile);
-};
-
-document.getElementById('search').addEventListener('input', e => {
-  const q = e.target.value;
-  clearTimeout(searchTimer);
-  if (!q) {
-    searchResults = null;
-    renderList('');
-    return;
-  }
-  searchTimer = setTimeout(async () => {
-    const seq = ++searchSeq;
+const api = {
+  async getPlans() {
+    const res = await fetch('/api/plans');
+    return res.json();
+  },
+  async getPlan(filename) {
+    const res = await fetch('/api/plans/' + encodeURIComponent(filename));
+    return res.text();
+  },
+  async savePlan(filename, content) {
+    await fetch('/api/plans/' + encodeURIComponent(filename), {
+      method: 'PUT', headers: { 'Content-Type': 'text/plain' }, body: content,
+    });
+  },
+  async deletePlan(filename) {
+    await fetch('/api/plans/' + encodeURIComponent(filename), { method: 'DELETE' });
+  },
+  async deleteBatch(files) {
+    await fetch('/api/plans/delete-batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files }),
+    });
+  },
+  async renamePlan(filename, newName) {
+    const res = await fetch('/api/plans/' + encodeURIComponent(filename) + '/rename', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newName }),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  },
+  async duplicatePlan(filename) {
+    const res = await fetch('/api/plans/' + encodeURIComponent(filename) + '/duplicate', { method: 'POST' });
+    if (!res.ok) return null;
+    return res.json();
+  },
+  async toggleFavorite(filename) {
+    const res = await fetch('/api/favorites/' + encodeURIComponent(filename), { method: 'POST' });
+    return res.json();
+  },
+  async search(q) {
     const res = await fetch('/api/search?q=' + encodeURIComponent(q));
-    const data = await res.json();
-    if (seq !== searchSeq) return; // discard stale
-    searchResults = data;
-    renderList(q);
-  }, 200);
-});
-document.getElementById('search').addEventListener('keydown', e => {
-  if (e.key === 'Escape') {
-    e.target.value = '';
-    searchResults = null;
-    clearTimeout(searchTimer);
-    renderList('');
+    return res.json();
+  },
+  async getComments(filename) {
+    const res = await fetch('/api/comments/' + encodeURIComponent(filename));
+    return res.json();
+  },
+  async createComment(filename, data) {
+    const res = await fetch('/api/comments/' + encodeURIComponent(filename), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    return res.json();
+  },
+  async replyComment(filename, threadId, body) {
+    const res = await fetch('/api/comments/' + encodeURIComponent(filename) + '/' + threadId + '/reply', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    });
+    return res.json();
+  },
+  async resolveComment(filename, threadId) {
+    await fetch('/api/comments/' + encodeURIComponent(filename) + '/' + threadId + '/resolve', { method: 'POST' });
+  },
+  async deleteComment(filename, threadId) {
+    await fetch('/api/comments/' + encodeURIComponent(filename) + '/' + threadId, { method: 'DELETE' });
+  },
+};
+
+// -- helpers --
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function timeAgo(iso) {
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + 'm ago';
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + 'h ago';
+  const days = Math.floor(hrs / 24);
+  return days + 'd ago';
+}
+
+// -- highlight engine --
+
+function flattenTextNodes(el) {
+  // returns { text, nodes: [{ node, start, end }] }
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  let text = '';
+  let node;
+  while ((node = walker.nextNode())) {
+    const start = text.length;
+    text += node.textContent;
+    nodes.push({ node, start, end: text.length });
   }
-});
+  return { text, nodes };
+}
 
-// header buttons
-document.getElementById('btn-edit').onclick = () => { if (activeFile) enterEdit(); };
-document.getElementById('btn-save').onclick = async () => {
-  if (!activeFile) return;
-  const html = document.getElementById('content').innerHTML;
-  const md = turndownService.turndown(html);
-  await savePlan(activeFile, md);
-  exitEdit();
-  // re-render from saved markdown for consistency
-  document.getElementById('content').innerHTML = marked.parse(activeContent);
-};
-document.getElementById('btn-cancel-edit').onclick = () => {
-  exitEdit();
-  if (activeContent) {
-    document.getElementById('content').innerHTML = marked.parse(activeContent);
+function applyCommentHighlights(el, threads) {
+  if (!el || !threads.length) return;
+  const unresolved = threads.filter(t => !t.resolved);
+  if (!unresolved.length) return;
+
+  const { text, nodes } = flattenTextNodes(el);
+
+  // find each thread's position in the flat text
+  const anchors = [];
+  for (const thread of unresolved) {
+    const searchStr = thread.prefix + thread.selectedText + thread.suffix;
+    const idx = text.indexOf(searchStr);
+    if (idx < 0) continue;
+    // offset within searchStr where selectedText begins
+    const selStart = idx + thread.prefix.length;
+    const selEnd = selStart + thread.selectedText.length;
+    anchors.push({ thread, selStart, selEnd });
   }
-};
 
-document.getElementById('btn-delete').onclick = async () => {
-  if (!activeFile) return;
-  const ok = await confirm('Delete "' + activeFile.replace(/\.md$/, '') + '"?');
-  if (ok) deletePlan(activeFile);
-};
+  // sort descending so DOM mutations don't shift earlier offsets
+  anchors.sort((a, b) => b.selStart - a.selStart);
 
-document.getElementById('btn-select').onclick = () => enterMultiselect();
-document.getElementById('cancel-select').onclick = () => exitMultiselect();
-document.getElementById('del-selected').onclick = async () => {
-  if (selected.size === 0) return;
-  const ok = await confirm('Delete ' + selected.size + ' plan(s)?');
-  if (ok) deleteBatch(selected);
-};
+  for (const { thread, selStart, selEnd } of anchors) {
+    wrapRange(nodes, selStart, selEnd, thread.id);
+  }
+}
 
-document.getElementById('btn-duplicate').onclick = () => {
-  if (activeFile) duplicatePlan(activeFile);
-};
+function wrapRange(nodes, start, end, threadId) {
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    if (n.end <= start || n.start >= end) continue;
 
-document.getElementById('btn-copy-path').onclick = () => {
-  if (!activeFile) return;
-  const path = '~/.claude/plans/' + activeFile;
-  navigator.clipboard.writeText(path);
-  const btn = document.getElementById('btn-copy-path');
-  btn.textContent = 'copied!';
-  setTimeout(() => { btn.textContent = 'copy path'; }, 1500);
-};
+    const node = n.node;
+    const nodeStart = Math.max(0, start - n.start);
+    const nodeEnd = Math.min(node.textContent.length, end - n.start);
 
-document.getElementById('btn-rename').onclick = () => {
-  if (!activeFile) return;
-  const titleEl = document.getElementById('content-title');
-  const current = activeFile.replace(/\.md$/, '');
-  titleEl.innerHTML = `<input id="rename-input" value="${esc(current)}">`;
-  const input = document.getElementById('rename-input');
-  input.focus();
-  input.select();
-
-  const finish = async () => {
-    const newName = input.value.trim();
-    if (newName && newName !== current) {
-      await renamePlan(activeFile, newName);
-    } else {
-      titleEl.textContent = current;
+    // split if partial match
+    let targetNode = node;
+    if (nodeEnd < node.textContent.length) {
+      targetNode.splitText(nodeEnd);
     }
-  };
-  input.addEventListener('keydown', e => {
-    if (e.key === 'Enter') finish();
-    if (e.key === 'Escape') { titleEl.textContent = current; }
+    if (nodeStart > 0) {
+      targetNode = targetNode.splitText(nodeStart);
+    }
+
+    const mark = document.createElement('mark');
+    mark.className = 'comment-highlight';
+    mark.dataset.threadId = threadId;
+    targetNode.parentNode.insertBefore(mark, targetNode);
+    mark.appendChild(targetNode);
+  }
+}
+
+function removeCommentHighlights(el) {
+  if (!el) return;
+  el.querySelectorAll('mark.comment-highlight').forEach(mark => {
+    const parent = mark.parentNode;
+    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+    parent.removeChild(mark);
+    parent.normalize();
   });
-  input.addEventListener('blur', finish);
-};
+}
 
-// keyboard: ctrl+s to save in edit mode
-document.addEventListener('keydown', e => {
-  if (editing && (e.metaKey || e.ctrlKey) && e.key === 's') {
-    e.preventDefault();
-    document.getElementById('btn-save').click();
-  }
-});
+function getSelectionContext(contentEl) {
+  const sel = window.getSelection();
+  if (!sel.rangeCount || sel.isCollapsed) return null;
 
-// toolbar commands
-document.getElementById('edit-toolbar').addEventListener('click', e => {
-  const btn = e.target.closest('button');
-  if (!btn) return;
-  const cmd = btn.dataset.cmd;
-  if (!cmd) return;
-  e.preventDefault();
-  if (cmd === 'bold') document.execCommand('bold');
-  else if (cmd === 'italic') document.execCommand('italic');
-  else if (cmd === 'code') {
-    const sel = window.getSelection();
-    if (sel.rangeCount) {
-      const range = sel.getRangeAt(0);
-      const code = document.createElement('code');
-      range.surroundContents(code);
+  const range = sel.getRangeAt(0);
+  // ensure selection is within content
+  if (!contentEl.contains(range.commonAncestorContainer)) return null;
+
+  const selectedText = sel.toString().trim();
+  if (!selectedText) return null;
+
+  // get flat text for prefix/suffix
+  const { text } = flattenTextNodes(contentEl);
+  const idx = text.indexOf(selectedText);
+  if (idx < 0) return null;
+
+  const prefix = text.slice(Math.max(0, idx - 30), idx);
+  const suffix = text.slice(idx + selectedText.length, idx + selectedText.length + 30);
+
+  return { selectedText, prefix, suffix, rect: range.getBoundingClientRect() };
+}
+
+// -- components --
+
+function PlanItem({ plan, active, selected, multiselect, onSelect, onLoad, onToggleFavorite }) {
+  const name = plan.name.replace(/\.md$/, '');
+  const date = new Date(plan.modified * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const cls = 'plan-item' + (active ? ' active' : '') + (selected ? ' selected' : '');
+  const starCls = 'star-btn' + (plan.favorited ? ' active' : '');
+
+  return html`
+    <div class=${cls} data-file=${plan.name} onClick=${() => multiselect ? onSelect(plan.name) : onLoad(plan.name)}>
+      <input type="checkbox" class="checkbox" checked=${selected}
+        style=${{ display: multiselect ? 'inline-block' : 'none' }} />
+      <div class="plan-info">
+        <div class="plan-name" title=${name}>${name}</div>
+        <div class="plan-date">${date}</div>
+        ${plan.snippet && html`<div class="plan-snippet" dangerouslySetInnerHTML=${{ __html: plan.snippet }}></div>`}
+      </div>
+      <button class=${starCls} onClick=${e => { e.stopPropagation(); onToggleFavorite(plan.name); }}>
+        ${plan.favorited ? '\u2605' : '\u2606'}
+      </button>
+    </div>
+  `;
+}
+
+function Sidebar({ plans, activeFile, multiselect, selected, searchResults,
+  onLoad, onSelect, onToggleFavorite, onEnterMultiselect, onExitMultiselect, onDeleteBatch, onSearch }) {
+  const [query, setQuery] = useState('');
+  const searchTimer = useRef(null);
+  const searchSeq = useRef(0);
+  const lastClickedIndex = useRef(null);
+
+  const filtered = useMemo(() => {
+    if (searchResults !== null) return searchResults;
+    const lf = query.toLowerCase();
+    return plans.filter(p => p.name.toLowerCase().includes(lf));
+  }, [plans, query, searchResults]);
+
+  const count = searchResults !== null ? filtered.length + ' results' : plans.length;
+
+  const handleSearch = useCallback((e) => {
+    const q = e.target.value;
+    setQuery(q);
+    clearTimeout(searchTimer.current);
+    if (!q) {
+      onSearch(null);
+      return;
     }
-  }
-  else if (cmd === 'h1') document.execCommand('formatBlock', false, 'h1');
-  else if (cmd === 'h2') document.execCommand('formatBlock', false, 'h2');
-  else if (cmd === 'h3') document.execCommand('formatBlock', false, 'h3');
-  else if (cmd === 'ul') document.execCommand('insertUnorderedList');
-  else if (cmd === 'ol') document.execCommand('insertOrderedList');
-  else if (cmd === 'link') {
-    const url = prompt('URL:');
-    if (url) document.execCommand('createLink', false, url);
-  }
-  document.getElementById('content').focus();
-});
+    searchTimer.current = setTimeout(() => {
+      const seq = ++searchSeq.current;
+      api.search(q).then(data => {
+        if (seq === searchSeq.current) onSearch(data);
+      });
+    }, 200);
+  }, [onSearch]);
 
-// paste as plain text to avoid injecting unwanted HTML
-document.getElementById('content').addEventListener('paste', e => {
-  if (!editing) return;
-  e.preventDefault();
-  const text = e.clipboardData.getData('text/plain');
-  document.execCommand('insertText', false, text);
-});
+  const handleSearchKey = useCallback((e) => {
+    if (e.key === 'Escape') {
+      setQuery('');
+      onSearch(null);
+    }
+  }, [onSearch]);
+
+  const handleItemClick = useCallback((e) => {
+    const item = e.target.closest('.plan-item');
+    if (!item) return;
+    if (e.target.closest('.star-btn')) return;
+    const file = item.dataset.file;
+    const items = [...item.parentNode.querySelectorAll('.plan-item')];
+    const clickedIdx = items.indexOf(item);
+
+    if (e.shiftKey && lastClickedIndex.current !== null) {
+      if (!multiselect) onEnterMultiselect();
+      const lo = Math.min(lastClickedIndex.current, clickedIdx);
+      const hi = Math.max(lastClickedIndex.current, clickedIdx);
+      for (let i = lo; i <= hi; i++) {
+        onSelect(items[i].dataset.file, true);
+      }
+      return;
+    }
+    lastClickedIndex.current = clickedIdx;
+  }, [multiselect, onEnterMultiselect, onSelect]);
+
+  return html`
+    <div id="sidebar" class=${multiselect ? 'multiselect-mode' : ''}>
+      <div id="sidebar-header">
+        <span>Claude Plans</span>
+        <span id="count">${count}</span>
+      </div>
+      <input id="search" type="text" placeholder="search plans..." value=${query}
+        onInput=${handleSearch} onKeyDown=${handleSearchKey} />
+      ${multiselect && html`
+        <div id="toolbar" class="visible">
+          <span id="sel-count">${selected.size} selected</span>
+          <button onClick=${onDeleteBatch}>delete</button>
+          <button class="cancel-btn" onClick=${onExitMultiselect}>cancel</button>
+        </div>
+      `}
+      <div id="plan-list" onClick=${handleItemClick}>
+        ${filtered.map(p => html`
+          <${PlanItem} key=${p.name} plan=${p} active=${p.name === activeFile}
+            selected=${selected.has(p.name)} multiselect=${multiselect}
+            onSelect=${onSelect} onLoad=${onLoad} onToggleFavorite=${onToggleFavorite} />
+        `)}
+      </div>
+    </div>
+  `;
+}
+
+function EditToolbar({ onCmd }) {
+  return html`
+    <div id="edit-toolbar" class="visible">
+      <button onClick=${() => onCmd('bold')} title="Bold (Ctrl+B)"><b>B</b></button>
+      <button onClick=${() => onCmd('italic')} title="Italic (Ctrl+I)"><i>I</i></button>
+      <button onClick=${() => onCmd('code')} title="Inline code">{ }</button>
+      <span class="sep"></span>
+      <button onClick=${() => onCmd('h1')} title="Heading 1">H1</button>
+      <button onClick=${() => onCmd('h2')} title="Heading 2">H2</button>
+      <button onClick=${() => onCmd('h3')} title="Heading 3">H3</button>
+      <span class="sep"></span>
+      <button onClick=${() => onCmd('ul')} title="Bullet list">\u2022 list</button>
+      <button onClick=${() => onCmd('ol')} title="Numbered list">1. list</button>
+      <span class="sep"></span>
+      <button onClick=${() => onCmd('link')} title="Insert link">link</button>
+    </div>
+  `;
+}
+
+function CommentToolbar({ pos, onComment }) {
+  if (!pos) return null;
+  const style = { display: 'block', left: pos.x + 'px', top: pos.y + 'px' };
+  return html`
+    <div class="comment-toolbar visible" style=${style}>
+      <button onClick=${onComment}>\u{1F4AC} comment</button>
+    </div>
+  `;
+}
+
+function CommentInputPopover({ pos, onSubmit, onCancel }) {
+  const [body, setBody] = useState('');
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (ref.current) ref.current.focus();
+  }, []);
+
+  const handleSubmit = () => {
+    if (!body.trim()) return;
+    onSubmit(body.trim());
+    setBody('');
+  };
+
+  const handleKey = (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleSubmit();
+    if (e.key === 'Escape') onCancel();
+  };
+
+  if (!pos) return null;
+  const style = { display: 'block', left: pos.x + 'px', top: pos.y + 'px' };
+
+  return html`
+    <div class="comment-popover visible" style=${style}>
+      <textarea ref=${ref} rows="3" placeholder="add a comment..."
+        value=${body} onInput=${e => setBody(e.target.value)} onKeyDown=${handleKey}></textarea>
+      <div class="comment-popover-actions">
+        <button class="header-btn" onClick=${onCancel}>cancel</button>
+        <button class="header-btn primary" onClick=${handleSubmit}>comment</button>
+      </div>
+    </div>
+  `;
+}
+
+function CommentThreadPopover({ thread, pos, onReply, onResolve, onDelete, onClose }) {
+  const [replyBody, setReplyBody] = useState('');
+  const ref = useRef(null);
+
+  if (!thread || !pos) return null;
+
+  const handleReply = () => {
+    if (!replyBody.trim()) return;
+    onReply(thread.id, replyBody.trim());
+    setReplyBody('');
+  };
+
+  const handleKey = (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleReply();
+    if (e.key === 'Escape') onClose();
+  };
+
+  const style = { display: 'block', left: pos.x + 'px', top: pos.y + 'px' };
+
+  return html`
+    <div class="comment-popover visible" style=${style}>
+      <div class="comment-quoted-text">${thread.selectedText}</div>
+      ${thread.comments.map(c => html`
+        <div class="comment-entry" key=${c.id}>
+          <div>${c.body}</div>
+          <div class="comment-time">${timeAgo(c.createdAt)}</div>
+        </div>
+      `)}
+      <textarea rows="2" placeholder="reply..." value=${replyBody}
+        onInput=${e => setReplyBody(e.target.value)} onKeyDown=${handleKey}></textarea>
+      <div class="comment-popover-actions">
+        <button class="header-btn" onClick=${handleReply}>reply</button>
+        <button class="header-btn" onClick=${() => onResolve(thread.id)}>resolve</button>
+        <button class="header-btn danger" onClick=${() => onDelete(thread.id)}>delete</button>
+      </div>
+    </div>
+  `;
+}
+
+function ConfirmDialog({ message, onConfirm, onCancel }) {
+  if (!message) return null;
+  return html`
+    <div class="dialog-overlay visible">
+      <div class="dialog">
+        <p>${message}</p>
+        <div class="dialog-buttons">
+          <button class="header-btn" onClick=${onCancel}>cancel</button>
+          <button class="header-btn danger" onClick=${onConfirm}>delete</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function ContentPane({ activeFile, activeContent, editing, commentThreads,
+  onSave, onEnterEdit, onExitEdit, onDelete, onDuplicate, onRename, onCopyPath,
+  onToggleFavorite, onEnterMultiselect, plans,
+  onCreateComment, onReplyComment, onResolveComment, onDeleteComment }) {
+
+  const contentRef = useRef(null);
+  const [commentToolbarPos, setCommentToolbarPos] = useState(null);
+  const [commentInputPos, setCommentInputPos] = useState(null);
+  const [pendingSelection, setPendingSelection] = useState(null);
+  const [activeThread, setActiveThread] = useState(null);
+  const [threadPopoverPos, setThreadPopoverPos] = useState(null);
+  const [renaming, setRenaming] = useState(false);
+  const [renamingValue, setRenamingValue] = useState('');
+  const [copyFeedback, setCopyFeedback] = useState(false);
+
+  const plan = plans.find(p => p.name === activeFile);
+  const isFav = plan?.favorited;
+  const unresolvedCount = commentThreads.filter(t => !t.resolved).length;
+
+  // render markdown + highlights when content or comments change
+  useEffect(() => {
+    if (!contentRef.current || !activeContent || editing) return;
+    contentRef.current.innerHTML = marked.parse(activeContent);
+    applyCommentHighlights(contentRef.current, commentThreads);
+  }, [activeContent, commentThreads, editing]);
+
+  // handle text selection for comment toolbar
+  const handleMouseUp = useCallback(() => {
+    if (editing) return;
+    // small delay so selection is finalized
+    setTimeout(() => {
+      const ctx = getSelectionContext(contentRef.current);
+      if (!ctx) {
+        setCommentToolbarPos(null);
+        return;
+      }
+      setCommentToolbarPos({
+        x: ctx.rect.left + ctx.rect.width / 2 - 50,
+        y: ctx.rect.top - 40,
+      });
+      setPendingSelection(ctx);
+    }, 10);
+  }, [editing]);
+
+  // handle click on comment highlight
+  const handleContentClick = useCallback((e) => {
+    if (editing) return;
+    const mark = e.target.closest('mark.comment-highlight');
+    if (mark) {
+      const threadId = mark.dataset.threadId;
+      const thread = commentThreads.find(t => t.id === threadId);
+      if (thread) {
+        const rect = mark.getBoundingClientRect();
+        setActiveThread(thread);
+        setThreadPopoverPos({
+          x: Math.min(rect.left, window.innerWidth - 340),
+          y: rect.bottom + 8,
+        });
+        setCommentToolbarPos(null);
+      }
+    }
+  }, [editing, commentThreads]);
+
+  // dismiss popovers on outside click
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.target.closest('.comment-toolbar') || e.target.closest('.comment-popover')) return;
+      setCommentToolbarPos(null);
+      setCommentInputPos(null);
+      setPendingSelection(null);
+      setActiveThread(null);
+      setThreadPopoverPos(null);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  // escape to dismiss popovers
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.key === 'Escape') {
+        setCommentToolbarPos(null);
+        setCommentInputPos(null);
+        setPendingSelection(null);
+        setActiveThread(null);
+        setThreadPopoverPos(null);
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, []);
+
+  const handleStartComment = useCallback(() => {
+    if (!pendingSelection) return;
+    setCommentInputPos({
+      x: Math.min(pendingSelection.rect.left, window.innerWidth - 340),
+      y: pendingSelection.rect.bottom + 8,
+    });
+    setCommentToolbarPos(null);
+    window.getSelection().removeAllRanges();
+  }, [pendingSelection]);
+
+  const handleSubmitComment = useCallback(async (body) => {
+    if (!pendingSelection || !activeFile) return;
+    await onCreateComment(activeFile, {
+      selectedText: pendingSelection.selectedText,
+      prefix: pendingSelection.prefix,
+      suffix: pendingSelection.suffix,
+      body,
+    });
+    setCommentInputPos(null);
+    setPendingSelection(null);
+  }, [pendingSelection, activeFile, onCreateComment]);
+
+  const handleReply = useCallback(async (threadId, body) => {
+    const comment = await onReplyComment(activeFile, threadId, body);
+    // update active thread with new reply inline
+    setActiveThread(prev => {
+      if (!prev || prev.id !== threadId) return prev;
+      return { ...prev, comments: [...prev.comments, comment] };
+    });
+  }, [activeFile, onReplyComment]);
+
+  const handleResolve = useCallback(async (threadId) => {
+    await onResolveComment(activeFile, threadId);
+    setActiveThread(null);
+    setThreadPopoverPos(null);
+  }, [activeFile, onResolveComment]);
+
+  const handleDeleteThread = useCallback(async (threadId) => {
+    await onDeleteComment(activeFile, threadId);
+    setActiveThread(null);
+    setThreadPopoverPos(null);
+  }, [activeFile, onDeleteComment]);
+
+  // edit mode
+  const handleEnterEdit = useCallback(() => {
+    removeCommentHighlights(contentRef.current);
+    const scrollY = contentRef.current.scrollTop;
+    contentRef.current.contentEditable = 'true';
+    contentRef.current.classList.add('editing');
+    // lock code blocks
+    contentRef.current.querySelectorAll('pre').forEach(el => {
+      el.contentEditable = 'false';
+      el.classList.add('locked-block');
+    });
+    contentRef.current.focus();
+    contentRef.current.scrollTop = scrollY;
+    onEnterEdit();
+  }, [onEnterEdit]);
+
+  const handleSave = useCallback(async () => {
+    const html = contentRef.current.innerHTML;
+    const md = turndownService.turndown(html);
+    contentRef.current.contentEditable = 'false';
+    contentRef.current.classList.remove('editing');
+    await onSave(activeFile, md);
+  }, [activeFile, onSave]);
+
+  const handleCancelEdit = useCallback(() => {
+    contentRef.current.contentEditable = 'false';
+    contentRef.current.classList.remove('editing');
+    contentRef.current.innerHTML = marked.parse(activeContent);
+    applyCommentHighlights(contentRef.current, commentThreads);
+    onExitEdit();
+  }, [activeContent, commentThreads, onExitEdit]);
+
+  const handleCmd = useCallback((cmd) => {
+    if (cmd === 'bold') document.execCommand('bold');
+    else if (cmd === 'italic') document.execCommand('italic');
+    else if (cmd === 'code') {
+      const sel = window.getSelection();
+      if (sel.rangeCount) {
+        const range = sel.getRangeAt(0);
+        const code = document.createElement('code');
+        range.surroundContents(code);
+      }
+    }
+    else if (cmd === 'h1') document.execCommand('formatBlock', false, 'h1');
+    else if (cmd === 'h2') document.execCommand('formatBlock', false, 'h2');
+    else if (cmd === 'h3') document.execCommand('formatBlock', false, 'h3');
+    else if (cmd === 'ul') document.execCommand('insertUnorderedList');
+    else if (cmd === 'ol') document.execCommand('insertOrderedList');
+    else if (cmd === 'link') {
+      const url = prompt('URL:');
+      if (url) document.execCommand('createLink', false, url);
+    }
+    contentRef.current.focus();
+  }, []);
+
+  // paste as plain text in edit mode
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    const handler = (e) => {
+      if (!editing) return;
+      e.preventDefault();
+      const text = e.clipboardData.getData('text/plain');
+      document.execCommand('insertText', false, text);
+    };
+    el.addEventListener('paste', handler);
+    return () => el.removeEventListener('paste', handler);
+  }, [editing]);
+
+  // ctrl+s to save
+  useEffect(() => {
+    const handler = (e) => {
+      if (editing && (e.metaKey || e.ctrlKey) && e.key === 's') {
+        e.preventDefault();
+        handleSave();
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [editing, handleSave]);
+
+  // rename
+  const handleStartRename = useCallback(() => {
+    setRenaming(true);
+    setRenamingValue(activeFile.replace(/\.md$/, ''));
+  }, [activeFile]);
+
+  const handleFinishRename = useCallback(async () => {
+    const newName = renamingValue.trim();
+    const current = activeFile.replace(/\.md$/, '');
+    setRenaming(false);
+    if (newName && newName !== current) {
+      await onRename(activeFile, newName);
+    }
+  }, [renamingValue, activeFile, onRename]);
+
+  const handleCopyPath = useCallback(() => {
+    navigator.clipboard.writeText('~/.claude/plans/' + activeFile);
+    setCopyFeedback(true);
+    setTimeout(() => setCopyFeedback(false), 1500);
+  }, [activeFile]);
+
+  if (!activeFile) {
+    return html`
+      <div id="content-wrap">
+        <div id="content-header"></div>
+        <div id="content" class="empty">select a plan</div>
+      </div>
+    `;
+  }
+
+  return html`
+    <div id="content-wrap">
+      <div id="content-header" class="visible">
+        ${renaming ? html`
+          <input id="rename-input" value=${renamingValue}
+            onInput=${e => setRenamingValue(e.target.value)}
+            onKeyDown=${e => { if (e.key === 'Enter') handleFinishRename(); if (e.key === 'Escape') setRenaming(false); }}
+            onBlur=${handleFinishRename}
+            ref=${el => el && setTimeout(() => { el.focus(); el.select(); }, 0)} />
+        ` : html`
+          <span id="content-title">${activeFile.replace(/\.md$/, '')}</span>
+        `}
+        <button class=${'star-btn' + (isFav ? ' active' : '')} style="font-size:18px" title="Toggle favorite"
+          onClick=${() => onToggleFavorite(activeFile)}>${isFav ? '\u2605' : '\u2606'}</button>
+        ${unresolvedCount > 0 && html`
+          <span class="comment-badge visible" onClick=${() => {
+            const first = contentRef.current?.querySelector('.comment-highlight');
+            if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }}>${unresolvedCount} comment${unresolvedCount > 1 ? 's' : ''}</span>
+        `}
+        ${!editing ? html`
+          <button class="header-btn" onClick=${() => onDuplicate(activeFile)}>duplicate</button>
+          <button class="header-btn" onClick=${handleStartRename}>rename</button>
+          <button class="header-btn" onClick=${handleCopyPath}>${copyFeedback ? 'copied!' : 'copy path'}</button>
+          <button class="header-btn" onClick=${handleEnterEdit}>edit</button>
+          <button class="header-btn" onClick=${onEnterMultiselect}>select</button>
+          <button class="header-btn danger" onClick=${() => onDelete(activeFile)}>delete</button>
+        ` : html`
+          <button class="header-btn primary" onClick=${handleSave}>save</button>
+          <button class="header-btn" onClick=${handleCancelEdit}>cancel</button>
+        `}
+      </div>
+      ${editing && html`<${EditToolbar} onCmd=${handleCmd} />`}
+      <div id="content" ref=${contentRef}
+        onMouseUp=${handleMouseUp} onClick=${handleContentClick}></div>
+      <${CommentToolbar} pos=${commentToolbarPos} onComment=${handleStartComment} />
+      <${CommentInputPopover} pos=${commentInputPos}
+        onSubmit=${handleSubmitComment}
+        onCancel=${() => { setCommentInputPos(null); setPendingSelection(null); }} />
+      <${CommentThreadPopover} thread=${activeThread} pos=${threadPopoverPos}
+        onReply=${handleReply} onResolve=${handleResolve}
+        onDelete=${handleDeleteThread}
+        onClose=${() => { setActiveThread(null); setThreadPopoverPos(null); }} />
+    </div>
+  `;
+}
+
+// -- app --
+
+function App() {
+  const [plans, setPlans] = useState([]);
+  const [activeFile, setActiveFile] = useState(null);
+  const [activeContent, setActiveContent] = useState('');
+  const [editing, setEditing] = useState(false);
+  const [multiselect, setMultiselect] = useState(false);
+  const [selected, setSelected] = useState(new Set());
+  const [searchResults, setSearchResults] = useState(null);
+  const [commentThreads, setCommentThreads] = useState([]);
+  const [confirmMsg, setConfirmMsg] = useState(null);
+  const confirmResolve = useRef(null);
+
+  const confirm = useCallback((msg) => {
+    return new Promise(resolve => {
+      setConfirmMsg(msg);
+      confirmResolve.current = resolve;
+    });
+  }, []);
+
+  const loadPlans = useCallback(async () => {
+    const data = await api.getPlans();
+    setPlans(data);
+  }, []);
+
+  const loadPlan = useCallback(async (filename) => {
+    setEditing(false);
+    setActiveFile(filename);
+    const content = await api.getPlan(filename);
+    setActiveContent(content);
+    const threads = await api.getComments(filename);
+    setCommentThreads(threads);
+  }, []);
+
+  const handleToggleFavorite = useCallback(async (filename) => {
+    const data = await api.toggleFavorite(filename);
+    setPlans(prev => {
+      const next = prev.map(p => p.name === filename ? { ...p, favorited: data.favorited } : p);
+      next.sort((a, b) => (a.favorited === b.favorited) ? b.modified - a.modified : a.favorited ? -1 : 1);
+      return next;
+    });
+  }, []);
+
+  const handleDelete = useCallback(async (filename) => {
+    const ok = await confirm('Delete "' + filename.replace(/\.md$/, '') + '"?');
+    if (!ok) return;
+    await api.deletePlan(filename);
+    if (activeFile === filename) {
+      setActiveFile(null);
+      setActiveContent('');
+      setCommentThreads([]);
+    }
+    await loadPlans();
+  }, [activeFile, confirm, loadPlans]);
+
+  const handleDeleteBatch = useCallback(async () => {
+    if (selected.size === 0) return;
+    const ok = await confirm('Delete ' + selected.size + ' plan(s)?');
+    if (!ok) return;
+    await api.deleteBatch(Array.from(selected));
+    if (selected.has(activeFile)) {
+      setActiveFile(null);
+      setActiveContent('');
+      setCommentThreads([]);
+    }
+    setMultiselect(false);
+    setSelected(new Set());
+    await loadPlans();
+  }, [selected, activeFile, confirm, loadPlans]);
+
+  const handleSave = useCallback(async (filename, content) => {
+    await api.savePlan(filename, content);
+    setActiveContent(content);
+    setEditing(false);
+    // reload comments to reapply highlights
+    const threads = await api.getComments(filename);
+    setCommentThreads(threads);
+    await loadPlans();
+  }, [loadPlans]);
+
+  const handleRename = useCallback(async (filename, newName) => {
+    const data = await api.renamePlan(filename, newName);
+    if (data) {
+      if (activeFile === filename) setActiveFile(data.name);
+      await loadPlans();
+      if (data.name) loadPlan(data.name);
+    }
+  }, [activeFile, loadPlans, loadPlan]);
+
+  const handleDuplicate = useCallback(async (filename) => {
+    const data = await api.duplicatePlan(filename);
+    if (data) {
+      await loadPlans();
+      loadPlan(data.name);
+    }
+  }, [loadPlans, loadPlan]);
+
+  const handleSelect = useCallback((name, forceAdd) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (forceAdd) next.add(name);
+      else if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }, []);
+
+  const handleCopyPath = useCallback(() => {
+    if (!activeFile) return;
+    navigator.clipboard.writeText('~/.claude/plans/' + activeFile);
+  }, [activeFile]);
+
+  // comment handlers
+  const handleCreateComment = useCallback(async (filename, data) => {
+    const thread = await api.createComment(filename, data);
+    setCommentThreads(prev => [...prev, thread]);
+  }, []);
+
+  const handleReplyComment = useCallback(async (filename, threadId, body) => {
+    const comment = await api.replyComment(filename, threadId, body);
+    setCommentThreads(prev => prev.map(t =>
+      t.id === threadId ? { ...t, comments: [...t.comments, comment] } : t
+    ));
+    return comment;
+  }, []);
+
+  const handleResolveComment = useCallback(async (filename, threadId) => {
+    await api.resolveComment(filename, threadId);
+    setCommentThreads(prev => prev.map(t =>
+      t.id === threadId ? { ...t, resolved: true } : t
+    ));
+  }, []);
+
+  const handleDeleteComment = useCallback(async (filename, threadId) => {
+    await api.deleteComment(filename, threadId);
+    setCommentThreads(prev => prev.filter(t => t.id !== threadId));
+  }, []);
+
+  useEffect(() => { loadPlans(); }, [loadPlans]);
+
+  return html`
+    <${Sidebar}
+      plans=${plans} activeFile=${activeFile}
+      multiselect=${multiselect} selected=${selected}
+      searchResults=${searchResults}
+      onLoad=${loadPlan} onSelect=${handleSelect}
+      onToggleFavorite=${handleToggleFavorite}
+      onEnterMultiselect=${() => { setMultiselect(true); setSelected(new Set()); }}
+      onExitMultiselect=${() => { setMultiselect(false); setSelected(new Set()); }}
+      onDeleteBatch=${handleDeleteBatch}
+      onSearch=${setSearchResults} />
+    <${ContentPane}
+      activeFile=${activeFile} activeContent=${activeContent}
+      editing=${editing} commentThreads=${commentThreads} plans=${plans}
+      onSave=${handleSave} onEnterEdit=${() => setEditing(true)} onExitEdit=${() => setEditing(false)}
+      onDelete=${handleDelete} onDuplicate=${handleDuplicate}
+      onRename=${handleRename} onCopyPath=${handleCopyPath}
+      onToggleFavorite=${handleToggleFavorite}
+      onEnterMultiselect=${() => { setMultiselect(true); setSelected(new Set()); }}
+      onCreateComment=${handleCreateComment}
+      onReplyComment=${handleReplyComment}
+      onResolveComment=${handleResolveComment}
+      onDeleteComment=${handleDeleteComment} />
+    <${ConfirmDialog} message=${confirmMsg}
+      onConfirm=${() => { setConfirmMsg(null); confirmResolve.current?.(true); }}
+      onCancel=${() => { setConfirmMsg(null); confirmResolve.current?.(false); }} />
+  `;
+}
+
+// -- mount --
+
+render(html`<${App} />`, document.getElementById('app'));
 
 // pwa
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js');
 }
-
-loadPlans();
