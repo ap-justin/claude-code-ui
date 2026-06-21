@@ -6,7 +6,6 @@ import json
 import os
 import re
 import signal
-import sqlite3
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -17,8 +16,13 @@ from urllib.parse import parse_qs, unquote, urlparse
 PLANS_DIR = Path.home() / ".claude" / "plans"
 STATIC_DIR = Path(__file__).parent / "static"
 FAVORITES_FILE = PLANS_DIR / ".favorites.json"
-DB_PATH = PLANS_DIR / "comments.db"
+HANDOFFS_DIR = Path(os.environ.get("TMPDIR", "/tmp"))
+HANDOFF_RE = re.compile(r"^handoff-[A-Za-z0-9._-]+\.md$")
 PORT = 3117
+
+# inline comments are stored as a JSON block in an HTML comment at end of file
+COMMENTS_MARKER = "<!-- __comments__"
+COMMENTS_END = "-->"
 
 
 def _load_favorites():
@@ -34,39 +38,6 @@ def _save_favorites(favs):
     FAVORITES_FILE.write_text(json.dumps(sorted(favs)), encoding="utf-8")
 
 
-def _init_db():
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS threads (
-            id TEXT PRIMARY KEY,
-            plan TEXT NOT NULL,
-            selected_text TEXT NOT NULL,
-            prefix TEXT NOT NULL DEFAULT '',
-            suffix TEXT NOT NULL DEFAULT '',
-            resolved INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS comments (
-            id TEXT PRIMARY KEY,
-            thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-            body TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_threads_plan ON threads(plan);
-        CREATE INDEX IF NOT EXISTS idx_comments_thread ON comments(thread_id);
-    """)
-    conn.close()
-
-
-def _get_db():
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
 def _gen_id(prefix=""):
     return f"{prefix}{uuid.uuid4().hex[:12]}"
 
@@ -75,31 +46,42 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_plan_file(filepath):
+    """split plan file into (content, threads_list)."""
+    raw = filepath.read_text(encoding="utf-8")
+    idx = raw.find(COMMENTS_MARKER)
+    if idx == -1:
+        return raw, []
+    content = raw[:idx].rstrip("\n")
+    json_start = idx + len(COMMENTS_MARKER)
+    json_end = raw.find(COMMENTS_END, json_start)
+    if json_end == -1:
+        return content, []
+    try:
+        threads = json.loads(raw[json_start:json_end].strip())
+    except (json.JSONDecodeError, TypeError):
+        threads = []
+    return content, threads
+
+
+def _write_plan_file(filepath, content, threads):
+    """write plan content with inline comments block."""
+    parts = [content.rstrip("\n")]
+    if threads:
+        parts.append("")
+        parts.append(COMMENTS_MARKER)
+        parts.append(json.dumps(threads, separators=(",", ":")))
+        parts.append(COMMENTS_END)
+    parts.append("")  # trailing newline
+    filepath.write_text("\n".join(parts), encoding="utf-8")
+
+
 def _threads_for_plan(plan):
-    """return nested thread+comments structure for a plan."""
-    db = _get_db()
-    rows = db.execute(
-        "SELECT * FROM threads WHERE plan = ? ORDER BY created_at", (plan,)
-    ).fetchall()
-    threads = []
-    for r in rows:
-        comments = db.execute(
-            "SELECT * FROM comments WHERE thread_id = ? ORDER BY created_at",
-            (r["id"],),
-        ).fetchall()
-        threads.append({
-            "id": r["id"],
-            "selectedText": r["selected_text"],
-            "prefix": r["prefix"],
-            "suffix": r["suffix"],
-            "resolved": bool(r["resolved"]),
-            "createdAt": r["created_at"],
-            "comments": [
-                {"id": c["id"], "body": c["body"], "createdAt": c["created_at"]}
-                for c in comments
-            ],
-        })
-    db.close()
+    """return threads list for a plan file."""
+    filepath = PLANS_DIR / plan
+    if not filepath.exists():
+        return []
+    _, threads = _parse_plan_file(filepath)
     return threads
 
 
@@ -115,13 +97,21 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/search":
             query = parse_qs(parsed.query).get("q", [""])[0]
             self._search_plans(query)
+        elif parsed.path == "/api/handoffs/search":
+            query = parse_qs(parsed.query).get("q", [""])[0]
+            self._search_handoffs(query)
         elif path == "/api/plans":
             self._serve_plan_list()
+        elif path == "/api/handoffs":
+            self._serve_handoff_list()
         elif path == "/api/favorites":
             self._json_response(sorted(_load_favorites()))
         elif path.startswith("/api/comments/"):
             filename = path[len("/api/comments/"):]
             self._get_comments(filename)
+        elif path.startswith("/api/handoffs/"):
+            filename = path[len("/api/handoffs/"):]
+            self._serve_handoff(filename)
         elif path.startswith("/api/plans/"):
             filename = path[len("/api/plans/"):]
             self._serve_plan(filename)
@@ -228,7 +218,7 @@ class Handler(SimpleHTTPRequestHandler):
             name_match = q in f.name.lower()
             snippet = None
             try:
-                content = f.read_text(encoding="utf-8")
+                content, _ = _parse_plan_file(f)
             except Exception:
                 content = ""
             # find content match
@@ -255,6 +245,84 @@ class Handler(SimpleHTTPRequestHandler):
         results.sort(key=lambda p: (not p["favorited"], -p["modified"]))
         self._json_response(results)
 
+    def _validate_handoff(self, filename):
+        if not HANDOFF_RE.match(filename):
+            self.send_error(403)
+            return None
+        filepath = HANDOFFS_DIR / filename
+        try:
+            if filepath.resolve().parent != HANDOFFS_DIR.resolve():
+                self.send_error(403)
+                return None
+        except OSError:
+            self.send_error(403)
+            return None
+        return filepath
+
+    def _list_handoff_files(self):
+        try:
+            return [f for f in HANDOFFS_DIR.iterdir()
+                    if f.is_file() and HANDOFF_RE.match(f.name)]
+        except OSError:
+            return []
+
+    def _serve_handoff_list(self):
+        items = []
+        for f in self._list_handoff_files():
+            try:
+                items.append({"name": f.name, "modified": f.stat().st_mtime, "path": str(f)})
+            except OSError:
+                continue
+        items.sort(key=lambda p: -p["modified"])
+        self._json_response(items)
+
+    def _serve_handoff(self, filename):
+        filepath = self._validate_handoff(filename)
+        if not filepath:
+            return
+        if not filepath.exists():
+            self.send_error(404)
+            return
+        try:
+            content = filepath.read_text(encoding="utf-8")
+        except OSError:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(content.encode("utf-8"))
+
+    def _search_handoffs(self, query):
+        q = query.lower()
+        if not q:
+            self._serve_handoff_list()
+            return
+        results = []
+        for f in self._list_handoff_files():
+            try:
+                content = f.read_text(encoding="utf-8")
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue
+            name_match = q in f.name.lower()
+            snippet = None
+            idx = content.lower().find(q)
+            if idx >= 0:
+                start = max(0, idx - 50)
+                end = min(len(content), idx + len(query) + 50)
+                raw = content[start:end]
+                escaped = html.escape(raw)
+                pattern = re.compile(re.escape(html.escape(query)), re.IGNORECASE)
+                escaped = pattern.sub(lambda m: f"<mark>{m.group()}</mark>", escaped)
+                prefix = "…" if start > 0 else ""
+                suffix = "…" if end < len(content) else ""
+                snippet = prefix + escaped + suffix
+            if name_match or snippet is not None:
+                results.append({"name": f.name, "modified": mtime, "path": str(f), "snippet": snippet})
+        results.sort(key=lambda p: -p["modified"])
+        self._json_response(results)
+
     def _serve_plan(self, filename):
         filepath = self._validate_path(filename)
         if not filepath:
@@ -262,7 +330,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not filepath.exists():
             self.send_error(404)
             return
-        content = filepath.read_text(encoding="utf-8")
+        content, _ = _parse_plan_file(filepath)
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
@@ -280,11 +348,6 @@ class Handler(SimpleHTTPRequestHandler):
         if filename in favs:
             favs.discard(filename)
             _save_favorites(favs)
-        # clean up comments
-        db = _get_db()
-        db.execute("DELETE FROM threads WHERE plan = ?", (filename,))
-        db.commit()
-        db.close()
         self._json_response({"ok": True})
 
     def _delete_batch(self):
@@ -299,16 +362,10 @@ class Handler(SimpleHTTPRequestHandler):
         updated = favs - set(deleted)
         if updated != favs:
             _save_favorites(updated)
-        # clean up comments
-        db = _get_db()
-        for name in deleted:
-            db.execute("DELETE FROM threads WHERE plan = ?", (name,))
-        db.commit()
-        db.close()
         self._json_response({"deleted": deleted})
 
     def _update_plan(self, filename):
-        """overwrite plan content."""
+        """overwrite plan content, preserving inline comments."""
         filepath = self._validate_path(filename)
         if not filepath:
             return
@@ -316,7 +373,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_error(404)
             return
         content = self._read_body().decode("utf-8")
-        filepath.write_text(content, encoding="utf-8")
+        _, threads = _parse_plan_file(filepath)
+        _write_plan_file(filepath, content, threads)
         self._json_response({"ok": True})
 
     def _rename_plan(self, filename):
@@ -343,11 +401,6 @@ class Handler(SimpleHTTPRequestHandler):
             favs.discard(filename)
             favs.add(new_name)
             _save_favorites(favs)
-        # migrate comments
-        db = _get_db()
-        db.execute("UPDATE threads SET plan = ? WHERE plan = ?", (new_name, filename))
-        db.commit()
-        db.close()
         self._json_response({"ok": True, "name": new_name})
 
     def _duplicate_plan(self, filename):
@@ -376,22 +429,15 @@ class Handler(SimpleHTTPRequestHandler):
         self._json_response(_threads_for_plan(filename))
 
     def _create_thread(self, filename):
+        filepath = self._validate_path(filename)
+        if not filepath or not filepath.exists():
+            self.send_error(404)
+            return
         body = json.loads(self._read_body())
         thread_id = _gen_id("t_")
         comment_id = _gen_id("c_")
         now = _now()
-        db = _get_db()
-        db.execute(
-            "INSERT INTO threads (id, plan, selected_text, prefix, suffix, created_at) VALUES (?,?,?,?,?,?)",
-            (thread_id, filename, body["selectedText"], body.get("prefix", ""), body.get("suffix", ""), now),
-        )
-        db.execute(
-            "INSERT INTO comments (id, thread_id, body, created_at) VALUES (?,?,?,?)",
-            (comment_id, thread_id, body["body"], now),
-        )
-        db.commit()
-        db.close()
-        self._json_response({
+        thread = {
             "id": thread_id,
             "selectedText": body["selectedText"],
             "prefix": body.get("prefix", ""),
@@ -399,33 +445,49 @@ class Handler(SimpleHTTPRequestHandler):
             "resolved": False,
             "createdAt": now,
             "comments": [{"id": comment_id, "body": body["body"], "createdAt": now}],
-        })
+        }
+        content, threads = _parse_plan_file(filepath)
+        threads.append(thread)
+        _write_plan_file(filepath, content, threads)
+        self._json_response(thread)
 
     def _reply_thread(self, filename, thread_id):
+        filepath = self._validate_path(filename)
+        if not filepath or not filepath.exists():
+            self.send_error(404)
+            return
         body = json.loads(self._read_body())
         comment_id = _gen_id("c_")
         now = _now()
-        db = _get_db()
-        db.execute(
-            "INSERT INTO comments (id, thread_id, body, created_at) VALUES (?,?,?,?)",
-            (comment_id, thread_id, body["body"], now),
-        )
-        db.commit()
-        db.close()
+        content, threads = _parse_plan_file(filepath)
+        for t in threads:
+            if t["id"] == thread_id:
+                t["comments"].append({"id": comment_id, "body": body["body"], "createdAt": now})
+                break
+        _write_plan_file(filepath, content, threads)
         self._json_response({"id": comment_id, "body": body["body"], "createdAt": now})
 
     def _resolve_thread(self, filename, thread_id):
-        db = _get_db()
-        db.execute("UPDATE threads SET resolved = 1 WHERE id = ?", (thread_id,))
-        db.commit()
-        db.close()
+        filepath = self._validate_path(filename)
+        if not filepath or not filepath.exists():
+            self.send_error(404)
+            return
+        content, threads = _parse_plan_file(filepath)
+        for t in threads:
+            if t["id"] == thread_id:
+                t["resolved"] = True
+                break
+        _write_plan_file(filepath, content, threads)
         self._json_response({"ok": True})
 
     def _delete_thread(self, filename, thread_id):
-        db = _get_db()
-        db.execute("DELETE FROM threads WHERE id = ?", (thread_id,))
-        db.commit()
-        db.close()
+        filepath = self._validate_path(filename)
+        if not filepath or not filepath.exists():
+            self.send_error(404)
+            return
+        content, threads = _parse_plan_file(filepath)
+        threads = [t for t in threads if t["id"] != thread_id]
+        _write_plan_file(filepath, content, threads)
         self._json_response({"ok": True})
 
     def _toggle_favorite(self, filename):
@@ -486,7 +548,6 @@ def _kill_existing(port):
 
 if __name__ == "__main__":
     _kill_existing(PORT)
-    _init_db()
     server = ReusableHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"serving on http://localhost:{PORT}")
     try:

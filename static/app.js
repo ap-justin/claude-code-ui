@@ -80,7 +80,31 @@ const api = {
   async deleteComment(filename, threadId) {
     await fetch('/api/comments/' + encodeURIComponent(filename) + '/' + threadId, { method: 'DELETE' });
   },
+  async getHandoffs() {
+    const res = await fetch('/api/handoffs');
+    return res.json();
+  },
+  async getHandoff(filename) {
+    const res = await fetch('/api/handoffs/' + encodeURIComponent(filename));
+    return res.text();
+  },
+  async searchHandoffs(q) {
+    const res = await fetch('/api/handoffs/search?q=' + encodeURIComponent(q));
+    return res.json();
+  },
 };
+
+// strip `handoff-` prefix, `.md` suffix, and trailing -YYYYMMDD-HHMMSS if present
+function handoffDisplayName(filename) {
+  let name = filename.replace(/^handoff-/, '').replace(/\.md$/, '');
+  name = name.replace(/-\d{8}-\d{6}$/, '');
+  return name || filename;
+}
+
+function readTabFromHash() {
+  const m = (location.hash || '').match(/tab=(\w+)/);
+  return m && m[1] === 'handoffs' ? 'handoffs' : 'plans';
+}
 
 // -- helpers --
 
@@ -226,20 +250,37 @@ function PlanItem({ plan, active, selected, multiselect, onSelect, onLoad, onTog
   `;
 }
 
-function Sidebar({ plans, activeFile, multiselect, selected, searchResults,
-  onLoad, onSelect, onToggleFavorite, onEnterMultiselect, onExitMultiselect, onDeleteBatch, onSearch }) {
+function HandoffItem({ item, active, onLoad }) {
+  const display = handoffDisplayName(item.name);
+  const date = new Date(item.modified * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const cls = 'plan-item' + (active ? ' active' : '');
+  return html`
+    <div class=${cls} onClick=${() => onLoad(item.name)}>
+      <div class="plan-info">
+        <div class="plan-name" title=${item.name}>${display}</div>
+        <div class="plan-date">${date}</div>
+        ${item.snippet && html`<div class="plan-snippet" dangerouslySetInnerHTML=${{ __html: item.snippet }}></div>`}
+      </div>
+    </div>
+  `;
+}
+
+function Sidebar({ plans, handoffs, tab, activeFile, multiselect, selected, searchResults,
+  onLoad, onLoadHandoff, onSelect, onToggleFavorite, onEnterMultiselect, onExitMultiselect,
+  onDeleteBatch, onSearch, onTabChange, onRefresh }) {
   const [query, setQuery] = useState('');
   const searchTimer = useRef(null);
   const searchSeq = useRef(0);
   const lastClickedIndex = useRef(null);
 
+  const source = tab === 'handoffs' ? handoffs : plans;
   const filtered = useMemo(() => {
     if (searchResults !== null) return searchResults;
     const lf = query.toLowerCase();
-    return plans.filter(p => p.name.toLowerCase().includes(lf));
-  }, [plans, query, searchResults]);
+    return source.filter(p => p.name.toLowerCase().includes(lf));
+  }, [source, query, searchResults]);
 
-  const count = searchResults !== null ? filtered.length + ' results' : plans.length;
+  const count = searchResults !== null ? filtered.length + ' results' : source.length;
 
   const handleSearch = useCallback((e) => {
     const q = e.target.value;
@@ -251,11 +292,19 @@ function Sidebar({ plans, activeFile, multiselect, selected, searchResults,
     }
     searchTimer.current = setTimeout(() => {
       const seq = ++searchSeq.current;
-      api.search(q).then(data => {
+      const fn = tab === 'handoffs' ? api.searchHandoffs : api.search;
+      fn(q).then(data => {
         if (seq === searchSeq.current) onSearch(data);
       });
     }, 200);
-  }, [onSearch]);
+  }, [onSearch, tab]);
+
+  // clear search on tab switch
+  useEffect(() => {
+    setQuery('');
+    onSearch(null);
+    clearTimeout(searchTimer.current);
+  }, [tab]);
 
   const handleSearchKey = useCallback((e) => {
     if (e.key === 'Escape') {
@@ -284,27 +333,40 @@ function Sidebar({ plans, activeFile, multiselect, selected, searchResults,
     lastClickedIndex.current = clickedIdx;
   }, [multiselect, onEnterMultiselect, onSelect]);
 
+  const isHandoffs = tab === 'handoffs';
   return html`
     <div id="sidebar" class=${multiselect ? 'multiselect-mode' : ''}>
       <div id="sidebar-header">
-        <span>Claude Plans</span>
+        <div id="tab-strip">
+          <button class=${'tab' + (!isHandoffs ? ' active' : '')} onClick=${() => onTabChange('plans')}>Plans</button>
+          <button class=${'tab' + (isHandoffs ? ' active' : '')} onClick=${() => onTabChange('handoffs')}>Handoffs</button>
+        </div>
         <span id="count">${count}</span>
+        <button class="refresh-btn" title="Refresh" onClick=${onRefresh}>↻</button>
       </div>
-      <input id="search" type="text" placeholder="search plans..." value=${query}
-        onInput=${handleSearch} onKeyDown=${handleSearchKey} />
-      ${multiselect && html`
+      <input id="search" type="text"
+        placeholder=${isHandoffs ? 'search handoffs...' : 'search plans...'}
+        value=${query} onInput=${handleSearch} onKeyDown=${handleSearchKey} />
+      ${!isHandoffs && multiselect && html`
         <div id="toolbar" class="visible">
           <span id="sel-count">${selected.size} selected</span>
           <button onClick=${onDeleteBatch}>delete</button>
           <button class="cancel-btn" onClick=${onExitMultiselect}>cancel</button>
         </div>
       `}
-      <div id="plan-list" onClick=${handleItemClick}>
-        ${filtered.map(p => html`
-          <${PlanItem} key=${p.name} plan=${p} active=${p.name === activeFile}
-            selected=${selected.has(p.name)} multiselect=${multiselect}
-            onSelect=${onSelect} onLoad=${onLoad} onToggleFavorite=${onToggleFavorite} />
-        `)}
+      <div id="plan-list" onClick=${isHandoffs ? undefined : handleItemClick}>
+        ${isHandoffs
+          ? (filtered.length === 0
+              ? html`<div class="empty-list">no handoffs in $TMPDIR</div>`
+              : filtered.map(p => html`
+                  <${HandoffItem} key=${p.name} item=${p}
+                    active=${p.name === activeFile} onLoad=${onLoadHandoff} />
+                `))
+          : filtered.map(p => html`
+              <${PlanItem} key=${p.name} plan=${p} active=${p.name === activeFile}
+                selected=${selected.has(p.name)} multiselect=${multiselect}
+                onSelect=${onSelect} onLoad=${onLoad} onToggleFavorite=${onToggleFavorite} />
+            `)}
       </div>
     </div>
   `;
@@ -427,7 +489,7 @@ function ConfirmDialog({ message, onConfirm, onCancel }) {
   `;
 }
 
-function ContentPane({ activeFile, activeContent, editing, commentThreads,
+function ContentPane({ activeFile, activeContent, editing, commentThreads, isHandoff, handoffPath,
   onSave, onEnterEdit, onExitEdit, onDelete, onDuplicate, onRename, onCopyPath,
   onToggleFavorite, onEnterMultiselect, plans,
   onCreateComment, onReplyComment, onResolveComment, onDeleteComment }) {
@@ -659,10 +721,11 @@ function ContentPane({ activeFile, activeContent, editing, commentThreads,
   }, [renamingValue, activeFile, onRename]);
 
   const handleCopyPath = useCallback(() => {
-    navigator.clipboard.writeText('~/.claude/plans/' + activeFile);
+    const p = isHandoff ? (handoffPath || activeFile) : ('~/.claude/plans/' + activeFile);
+    navigator.clipboard.writeText(p);
     setCopyFeedback(true);
     setTimeout(() => setCopyFeedback(false), 1500);
-  }, [activeFile]);
+  }, [activeFile, isHandoff, handoffPath]);
 
   if (!activeFile) {
     return html`
@@ -681,28 +744,32 @@ function ContentPane({ activeFile, activeContent, editing, commentThreads,
             onInput=${e => setRenamingValue(e.target.value)}
             onKeyDown=${e => { if (e.key === 'Enter') handleFinishRename(); if (e.key === 'Escape') setRenaming(false); }}
             onBlur=${handleFinishRename}
-            ref=${el => el && setTimeout(() => { el.focus(); el.select(); }, 0)} />
+            ref=${el => { if (el && !el.dataset.inited) { el.dataset.inited = '1'; setTimeout(() => { el.focus(); el.select(); }, 0); }}} />
         ` : html`
-          <span id="content-title">${activeFile.replace(/\.md$/, '')}</span>
+          <span id="content-title">${isHandoff ? handoffDisplayName(activeFile) : activeFile.replace(/\.md$/, '')}</span>
         `}
-        <button class=${'star-btn' + (isFav ? ' active' : '')} style="font-size:18px" title="Toggle favorite"
-          onClick=${() => onToggleFavorite(activeFile)}>${isFav ? '\u2605' : '\u2606'}</button>
-        ${unresolvedCount > 0 && html`
-          <span class="comment-badge visible" onClick=${() => {
-            const first = contentRef.current?.querySelector('.comment-highlight');
-            if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }}>${unresolvedCount} comment${unresolvedCount > 1 ? 's' : ''}</span>
-        `}
-        ${!editing ? html`
-          <button class="header-btn" onClick=${() => onDuplicate(activeFile)}>duplicate</button>
-          <button class="header-btn" onClick=${handleStartRename}>rename</button>
+        ${isHandoff ? html`
           <button class="header-btn" onClick=${handleCopyPath}>${copyFeedback ? 'copied!' : 'copy path'}</button>
-          <button class="header-btn" onClick=${handleEnterEdit}>edit</button>
-          <button class="header-btn" onClick=${onEnterMultiselect}>select</button>
-          <button class="header-btn danger" onClick=${() => onDelete(activeFile)}>delete</button>
         ` : html`
-          <button class="header-btn primary" onClick=${handleSave}>save</button>
-          <button class="header-btn" onClick=${handleCancelEdit}>cancel</button>
+          <button class=${'star-btn' + (isFav ? ' active' : '')} style="font-size:18px" title="Toggle favorite"
+            onClick=${() => onToggleFavorite(activeFile)}>${isFav ? '\u2605' : '\u2606'}</button>
+          ${unresolvedCount > 0 && html`
+            <span class="comment-badge visible" onClick=${() => {
+              const first = contentRef.current?.querySelector('.comment-highlight');
+              if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }}>${unresolvedCount} comment${unresolvedCount > 1 ? 's' : ''}</span>
+          `}
+          ${!editing ? html`
+            <button class="header-btn" onClick=${() => onDuplicate(activeFile)}>duplicate</button>
+            <button class="header-btn" onClick=${handleStartRename}>rename</button>
+            <button class="header-btn" onClick=${handleCopyPath}>${copyFeedback ? 'copied!' : 'copy path'}</button>
+            <button class="header-btn" onClick=${handleEnterEdit}>edit</button>
+            <button class="header-btn" onClick=${onEnterMultiselect}>select</button>
+            <button class="header-btn danger" onClick=${() => onDelete(activeFile)}>delete</button>
+          ` : html`
+            <button class="header-btn primary" onClick=${handleSave}>save</button>
+            <button class="header-btn" onClick=${handleCancelEdit}>cancel</button>
+          `}
         `}
       </div>
       ${editing && html`<${EditToolbar} onCmd=${handleCmd} />`}
@@ -724,7 +791,10 @@ function ContentPane({ activeFile, activeContent, editing, commentThreads,
 
 function App() {
   const [plans, setPlans] = useState([]);
+  const [handoffs, setHandoffs] = useState([]);
+  const [tab, setTab] = useState(readTabFromHash());
   const [activeFile, setActiveFile] = useState(null);
+  const [activeKind, setActiveKind] = useState('plan'); // 'plan' | 'handoff'
   const [activeContent, setActiveContent] = useState('');
   const [editing, setEditing] = useState(false);
   const [multiselect, setMultiselect] = useState(false);
@@ -733,6 +803,13 @@ function App() {
   const [commentThreads, setCommentThreads] = useState([]);
   const [confirmMsg, setConfirmMsg] = useState(null);
   const confirmResolve = useRef(null);
+
+  const isHandoff = activeKind === 'handoff';
+  const handoffPath = useMemo(() => {
+    if (!isHandoff || !activeFile) return null;
+    const found = handoffs.find(h => h.name === activeFile);
+    return found?.path || null;
+  }, [isHandoff, activeFile, handoffs]);
 
   const confirm = useCallback((msg) => {
     return new Promise(resolve => {
@@ -746,14 +823,60 @@ function App() {
     setPlans(data);
   }, []);
 
+  const loadHandoffs = useCallback(async () => {
+    const data = await api.getHandoffs();
+    setHandoffs(data);
+  }, []);
+
   const loadPlan = useCallback(async (filename) => {
     setEditing(false);
     setActiveFile(filename);
+    setActiveKind('plan');
     const content = await api.getPlan(filename);
     setActiveContent(content);
     const threads = await api.getComments(filename);
     setCommentThreads(threads);
   }, []);
+
+  const loadHandoff = useCallback(async (filename) => {
+    setEditing(false);
+    setActiveFile(filename);
+    setActiveKind('handoff');
+    setCommentThreads([]);
+    const content = await api.getHandoff(filename);
+    setActiveContent(content);
+  }, []);
+
+  const handleTabChange = useCallback((next) => {
+    setTab(next);
+    location.hash = 'tab=' + next;
+    setSearchResults(null);
+  }, []);
+
+  const handleRefresh = useCallback(() => {
+    if (tab === 'handoffs') loadHandoffs();
+    else loadPlans();
+  }, [tab, loadHandoffs, loadPlans]);
+
+  // refresh active tab on window focus
+  useEffect(() => {
+    const onFocus = () => handleRefresh();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [handleRefresh]);
+
+  // respond to hash changes (back/forward)
+  useEffect(() => {
+    const onHash = () => setTab(readTabFromHash());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  // load list for active tab when it changes
+  useEffect(() => {
+    if (tab === 'handoffs') loadHandoffs();
+    else loadPlans();
+  }, [tab, loadHandoffs, loadPlans]);
 
   const handleToggleFavorite = useCallback(async (filename) => {
     const data = await api.toggleFavorite(filename);
@@ -859,22 +982,24 @@ function App() {
     setCommentThreads(prev => prev.filter(t => t.id !== threadId));
   }, []);
 
-  useEffect(() => { loadPlans(); }, [loadPlans]);
-
   return html`
     <${Sidebar}
-      plans=${plans} activeFile=${activeFile}
+      plans=${plans} handoffs=${handoffs} tab=${tab}
+      activeFile=${activeFile}
       multiselect=${multiselect} selected=${selected}
       searchResults=${searchResults}
-      onLoad=${loadPlan} onSelect=${handleSelect}
+      onLoad=${loadPlan} onLoadHandoff=${loadHandoff} onSelect=${handleSelect}
       onToggleFavorite=${handleToggleFavorite}
       onEnterMultiselect=${() => { setMultiselect(true); setSelected(new Set()); }}
       onExitMultiselect=${() => { setMultiselect(false); setSelected(new Set()); }}
       onDeleteBatch=${handleDeleteBatch}
-      onSearch=${setSearchResults} />
+      onSearch=${setSearchResults}
+      onTabChange=${handleTabChange}
+      onRefresh=${handleRefresh} />
     <${ContentPane}
       activeFile=${activeFile} activeContent=${activeContent}
       editing=${editing} commentThreads=${commentThreads} plans=${plans}
+      isHandoff=${isHandoff} handoffPath=${handoffPath}
       onSave=${handleSave} onEnterEdit=${() => setEditing(true)} onExitEdit=${() => setEditing(false)}
       onDelete=${handleDelete} onDuplicate=${handleDuplicate}
       onRename=${handleRename} onCopyPath=${handleCopyPath}
